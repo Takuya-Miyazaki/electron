@@ -4,7 +4,6 @@
 
 #import "shell/browser/mac/electron_application.h"
 
-#include <memory>
 #include <string>
 #include <utility>
 
@@ -56,7 +55,7 @@ inline void dispatch_sync_main(dispatch_block_t block) {
   electron::Browser::Get()->Quit();
 }
 
-- (void)setShutdownHandler:(base::Callback<bool()>)handler {
+- (void)setShutdownHandler:(base::RepeatingCallback<bool()>)handler {
   shouldShutdown_ = std::move(handler);
 }
 
@@ -78,8 +77,7 @@ inline void dispatch_sync_main(dispatch_block_t block) {
 - (void)setCurrentActivity:(NSString*)type
               withUserInfo:(NSDictionary*)userInfo
             withWebpageURL:(NSURL*)webpageURL {
-  currentActivity_ = base::scoped_nsobject<NSUserActivity>(
-      [[NSUserActivity alloc] initWithActivityType:type]);
+  currentActivity_ = [[NSUserActivity alloc] initWithActivityType:type];
   [currentActivity_ setUserInfo:userInfo];
   [currentActivity_ setWebpageURL:webpageURL];
   [currentActivity_ setDelegate:self];
@@ -88,21 +86,19 @@ inline void dispatch_sync_main(dispatch_block_t block) {
 }
 
 - (NSUserActivity*)getCurrentActivity {
-  return currentActivity_.get();
+  return currentActivity_;
 }
 
 - (void)invalidateCurrentActivity {
   if (currentActivity_) {
     [currentActivity_ invalidate];
-    currentActivity_.reset();
+    currentActivity_ = nil;
   }
 }
 
 - (void)resignCurrentActivity {
-  if (@available(macOS 10.11, *)) {
-    if (currentActivity_)
-      [currentActivity_ resignCurrent];
-  }
+  if (currentActivity_)
+    [currentActivity_ resignCurrent];
 }
 
 - (void)updateCurrentActivity:(NSString*)type
@@ -122,8 +118,8 @@ inline void dispatch_sync_main(dispatch_block_t block) {
   dispatch_sync_main(^{
     std::string activity_type(
         base::SysNSStringToUTF8(userActivity.activityType));
-    base::DictionaryValue user_info =
-        electron::NSDictionaryToDictionaryValue(userActivity.userInfo);
+    base::Value::Dict user_info =
+        electron::NSDictionaryToValue(userActivity.userInfo);
 
     electron::Browser* browser = electron::Browser::Get();
     shouldWait =
@@ -151,8 +147,8 @@ inline void dispatch_sync_main(dispatch_block_t block) {
   dispatch_async(dispatch_get_main_queue(), ^{
     std::string activity_type(
         base::SysNSStringToUTF8(userActivity.activityType));
-    base::DictionaryValue user_info =
-        electron::NSDictionaryToDictionaryValue(userActivity.userInfo);
+    base::Value::Dict user_info =
+        electron::NSDictionaryToValue(userActivity.userInfo);
 
     electron::Browser* browser = electron::Browser::Get();
     browser->UserActivityWasContinued(activity_type, std::move(user_info));
@@ -177,36 +173,69 @@ inline void dispatch_sync_main(dispatch_block_t block) {
   electron::Browser::Get()->OpenURL(base::SysNSStringToUTF8(url));
 }
 
-- (bool)voiceOverEnabled {
-  NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
-  [defaults addSuiteNamed:@"com.apple.universalaccess"];
-  [defaults synchronize];
-
-  return [defaults boolForKey:@"voiceOverOnOffKey"];
+// Returns the list of accessibility attributes that this object supports.
+- (NSArray*)accessibilityAttributeNames {
+  NSMutableArray* attributes =
+      [[super accessibilityAttributeNames] mutableCopy];
+  [attributes addObject:@"AXManualAccessibility"];
+  return attributes;
 }
 
-- (void)accessibilitySetValue:(id)value forAttribute:(NSString*)attribute {
-  // Undocumented attribute that VoiceOver happens to set while running.
-  // Chromium uses this too, even though it's not exactly right.
-  if ([attribute isEqualToString:@"AXEnhancedUserInterface"]) {
-    bool enableAccessibility = ([self voiceOverEnabled] && [value boolValue]);
-    [self updateAccessibilityEnabled:enableAccessibility];
-  } else if ([attribute isEqualToString:@"AXManualAccessibility"]) {
-    [self updateAccessibilityEnabled:[value boolValue]];
+// Returns whether or not the specified attribute can be set by the
+// accessibility API via |accessibilitySetValue:forAttribute:|.
+- (BOOL)accessibilityIsAttributeSettable:(NSString*)attribute {
+  bool is_manual_ax = [attribute isEqualToString:@"AXManualAccessibility"];
+  return is_manual_ax || [super accessibilityIsAttributeSettable:attribute];
+}
+
+// Returns the accessibility value for the given attribute.  If the value isn't
+// supported this will return nil.
+- (id)accessibilityAttributeValue:(NSString*)attribute {
+  if ([attribute isEqualToString:@"AXManualAccessibility"]) {
+    auto* ax_state = content::BrowserAccessibilityState::GetInstance();
+    return [NSNumber numberWithBool:ax_state->IsAccessibleBrowser()];
   }
+
+  return [super accessibilityAttributeValue:attribute];
+}
+
+// Sets the value for an accessibility attribute via the accessibility API.
+// AXEnhancedUserInterface is an undocumented attribute that screen reader
+// related functionality sets when running, and AXManualAccessibility is an
+// attribute Electron specifically allows third-party apps to use to enable
+// a11y features in Electron.
+- (void)accessibilitySetValue:(id)value forAttribute:(NSString*)attribute {
+  bool is_manual_ax = [attribute isEqualToString:@"AXManualAccessibility"];
+  if ([attribute isEqualToString:@"AXEnhancedUserInterface"] || is_manual_ax) {
+    auto* ax_state = content::BrowserAccessibilityState::GetInstance();
+    if ([value boolValue]) {
+      ax_state->OnScreenReaderDetected();
+    } else {
+      ax_state->DisableAccessibility();
+    }
+
+    electron::Browser::Get()->OnAccessibilitySupportChanged();
+
+    // Don't call the superclass function for AXManualAccessibility,
+    // as it will log an AXError and make it appear as though the attribute
+    // failed to take effect.
+    if (is_manual_ax)
+      return;
+  }
+
   return [super accessibilitySetValue:value forAttribute:attribute];
 }
 
-- (void)updateAccessibilityEnabled:(BOOL)enabled {
+- (NSAccessibilityRole)accessibilityRole {
+  // For non-VoiceOver AT, such as Voice Control, Apple recommends turning on
+  // a11y when an AT accesses the 'accessibilityRole' property. This function
+  // is accessed frequently so we only change the accessibility state when
+  // accessibility is disabled.
   auto* ax_state = content::BrowserAccessibilityState::GetInstance();
-
-  if (enabled) {
-    ax_state->OnScreenReaderDetected();
-  } else {
-    ax_state->DisableAccessibility();
+  if (!ax_state->GetAccessibilityMode().has_mode(ui::kAXModeBasic.flags())) {
+    ax_state->AddAccessibilityModeFlags(ui::kAXModeBasic);
   }
-
-  electron::Browser::Get()->OnAccessibilitySupportChanged();
+  return [super accessibilityRole];
 }
 
 - (void)orderFrontStandardAboutPanel:(id)sender {

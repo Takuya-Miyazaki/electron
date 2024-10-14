@@ -2,15 +2,10 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_UI_WEBUI_ACCESSIBILITY_UI_H_
-#define SHELL_BROWSER_UI_WEBUI_ACCESSIBILITY_UI_H_
+#ifndef ELECTRON_SHELL_BROWSER_UI_WEBUI_ACCESSIBILITY_UI_H_
+#define ELECTRON_SHELL_BROWSER_UI_WEBUI_ACCESSIBILITY_UI_H_
 
-#include <memory>
-#include <string>
-#include <vector>
-
-#include "base/macros.h"
-#include "chrome/browser/accessibility/accessibility_ui.h"
+#include "chrome/browser/ui/webui/accessibility/accessibility_ui.h"
 #include "content/public/browser/web_ui_controller.h"
 #include "content/public/browser/web_ui_data_source.h"
 #include "content/public/browser/web_ui_message_handler.h"
@@ -28,12 +23,23 @@ class ElectronAccessibilityUIMessageHandler
  public:
   ElectronAccessibilityUIMessageHandler();
 
+  // disable copy
+  ElectronAccessibilityUIMessageHandler(
+      const ElectronAccessibilityUIMessageHandler&) = delete;
+  ElectronAccessibilityUIMessageHandler& operator=(
+      const ElectronAccessibilityUIMessageHandler&) = delete;
+
   void RegisterMessages() final;
 
- private:
-  void RequestNativeUITree(const base::ListValue* args);
+  static void RegisterPrefs(user_prefs::PrefRegistrySyncable* registry);
 
-  DISALLOW_COPY_AND_ASSIGN(ElectronAccessibilityUIMessageHandler);
+ private:
+  void GetRequestTypeAndFilters(const base::Value::Dict& data,
+                                std::string& request_type,
+                                std::string& allow,
+                                std::string& allow_empty,
+                                std::string& deny);
+  void RequestNativeUITree(const base::Value::List& args);
 };
 
-#endif  // SHELL_BROWSER_UI_WEBUI_ACCESSIBILITY_UI_H_
+#endif  // ELECTRON_SHELL_BROWSER_UI_WEBUI_ACCESSIBILITY_UI_H_

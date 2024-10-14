@@ -1,5 +1,7 @@
-import { webFrame } from 'electron';
+import { IPC_MESSAGES } from '@electron/internal/common/ipc-messages';
 import { ipcRendererInternal } from '@electron/internal/renderer/ipc-renderer-internal';
+
+const { mainFrame: webFrame } = process._linkedBinding('electron_renderer_web_frame');
 
 let shouldLog: boolean | null = null;
 
@@ -76,15 +78,8 @@ const isLocalhost = function () {
  *
  * @returns {boolean} Is a CSP with `unsafe-eval` set?
  */
-const isUnsafeEvalEnabled = function () {
-  return webFrame.executeJavaScript(`(${(() => {
-    try {
-      new Function(''); // eslint-disable-line no-new,no-new-func
-    } catch {
-      return false;
-    }
-    return true;
-  }).toString()})()`, false);
+const isUnsafeEvalEnabled = () => {
+  return webFrame._isEvalAllowed();
 };
 
 const moreInformation = `\nFor more information and help, consult
@@ -102,10 +97,14 @@ const warnAboutInsecureResources = function () {
     return;
   }
 
+  const isLocal = (url: URL): boolean =>
+    ['localhost', '127.0.0.1', '[::1]', ''].includes(url.hostname);
+  const isInsecure = (url: URL): boolean =>
+    ['http:', 'ftp:'].includes(url.protocol) && !isLocal(url);
+
   const resources = window.performance
     .getEntriesByType('resource')
-    .filter(({ name }) => /^(http|ftp):/gi.test(name || ''))
-    .filter(({ name }) => new URL(name).hostname !== 'localhost')
+    .filter(({ name }) => isInsecure(new URL(name)))
     .map(({ name }) => `- ${name}`)
     .join('\n');
 
@@ -169,16 +168,14 @@ const warnAboutDisabledWebSecurity = function (webPreferences?: Electron.WebPref
  * Logs a warning message about unset or insecure CSP
  */
 const warnAboutInsecureCSP = function () {
-  isUnsafeEvalEnabled().then((enabled) => {
-    if (!enabled) return;
+  if (!isUnsafeEvalEnabled()) return;
 
-    const warning = `This renderer process has either no Content Security
-    Policy set or a policy with "unsafe-eval" enabled. This exposes users of
-    this app to unnecessary security risks.\n${moreInformation}`;
+  const warning = `This renderer process has either no Content Security
+  Policy set or a policy with "unsafe-eval" enabled. This exposes users of
+  this app to unnecessary security risks.\n${moreInformation}`;
 
-    console.warn('%cElectron Security Warning (Insecure Content-Security-Policy)',
-      'font-weight: bold;', warning);
-  });
+  console.warn('%cElectron Security Warning (Insecure Content-Security-Policy)',
+    'font-weight: bold;', warning);
 };
 
 /**
@@ -222,8 +219,8 @@ const warnAboutExperimentalFeatures = function (webPreferences?: Electron.WebPre
  */
 const warnAboutEnableBlinkFeatures = function (webPreferences?: Electron.WebPreferences) {
   if (!webPreferences ||
-    !Object.prototype.hasOwnProperty.call(webPreferences, 'enableBlinkFeatures') ||
-    (webPreferences.enableBlinkFeatures && webPreferences.enableBlinkFeatures.length === 0)) {
+    !Object.hasOwn(webPreferences, 'enableBlinkFeatures') ||
+    (webPreferences.enableBlinkFeatures != null && webPreferences.enableBlinkFeatures.length === 0)) {
     return;
   }
 
@@ -264,27 +261,6 @@ const warnAboutAllowedPopups = function () {
 //   #13 Disable or limit creation of new windows
 //   #14 Do not use `openExternal` with untrusted content
 
-// #15 on the checklist: Disable the `remote` module
-// Logs a warning message about the remote module
-
-const warnAboutRemoteModuleWithRemoteContent = function (webPreferences?: Electron.WebPreferences) {
-  if (!webPreferences || isLocalhost()) return;
-  const remoteModuleEnabled = webPreferences.enableRemoteModule != null ? !!webPreferences.enableRemoteModule : true;
-  if (!remoteModuleEnabled) return;
-
-  if (getIsRemoteProtocol()) {
-    const warning = `This renderer process has "enableRemoteModule" enabled
-    and attempted to load remote content from '${window.location}'. This
-    exposes users of this app to unnecessary security risks.\n${moreInformation}`;
-
-    console.warn('%cElectron Security Warning (enableRemoteModule)',
-      'font-weight: bold;', warning);
-  }
-};
-
-// Currently missing since we can't easily programmatically check for it:
-//   #16 Filter the `remote` module
-
 const logSecurityWarnings = function (
   webPreferences: Electron.WebPreferences | undefined, nodeIntegration: boolean
 ) {
@@ -296,12 +272,11 @@ const logSecurityWarnings = function (
   warnAboutEnableBlinkFeatures(webPreferences);
   warnAboutInsecureCSP();
   warnAboutAllowedPopups();
-  warnAboutRemoteModuleWithRemoteContent(webPreferences);
 };
 
 const getWebPreferences = async function () {
   try {
-    return ipcRendererInternal.invoke<Electron.WebPreferences>('ELECTRON_BROWSER_GET_LAST_WEB_PREFERENCES');
+    return ipcRendererInternal.invoke<Electron.WebPreferences>(IPC_MESSAGES.BROWSER_GET_LAST_WEB_PREFERENCES);
   } catch (error) {
     console.warn(`getLastWebPreferences() failed: ${error}`);
   }

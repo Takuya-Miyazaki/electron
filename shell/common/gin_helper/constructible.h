@@ -2,13 +2,13 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_COMMON_GIN_HELPER_CONSTRUCTIBLE_H_
-#define SHELL_COMMON_GIN_HELPER_CONSTRUCTIBLE_H_
+#ifndef ELECTRON_SHELL_COMMON_GIN_HELPER_CONSTRUCTIBLE_H_
+#define ELECTRON_SHELL_COMMON_GIN_HELPER_CONSTRUCTIBLE_H_
 
 #include "gin/per_isolate_data.h"
-#include "gin/wrappable.h"
-#include "shell/browser/event_emitter_mixin.h"
+#include "shell/common/gin_helper/event_emitter_template.h"
 #include "shell/common/gin_helper/function_template_extensions.h"
+#include "v8/include/v8-context.h"
 
 namespace gin_helper {
 template <typename T>
@@ -23,8 +23,8 @@ class EventEmitterMixin;
 //   class Example : public gin::Wrappable<Example>,
 //                   public gin_helper::Constructible<Example> {
 //    public:
-//     static gin::Handle<Tray> New(...usual gin method arguments...);
-//     static v8::Local<v8::ObjectTemplate> FillObjectTemplate(
+//     static gin::Handle<Example> New(...usual gin method arguments...);
+//     static void FillObjectTemplate(
 //         v8::Isolate*,
 //         v8::Local<v8::ObjectTemplate>);
 //   }
@@ -55,9 +55,9 @@ class Constructible {
       }
       constructor->InstanceTemplate()->SetInternalFieldCount(
           gin::kNumberOfInternalFields);
-      v8::Local<v8::ObjectTemplate> obj_templ =
-          T::FillObjectTemplate(isolate, constructor->InstanceTemplate());
-      data->SetObjectTemplate(wrapper_info, obj_templ);
+      constructor->SetClassName(gin::StringToV8(isolate, T::GetClassName()));
+      T::FillObjectTemplate(isolate, constructor->PrototypeTemplate());
+      data->SetObjectTemplate(wrapper_info, constructor->InstanceTemplate());
       data->SetFunctionTemplate(wrapper_info, constructor);
     }
     return constructor->GetFunction(context).ToLocalChecked();
@@ -66,4 +66,4 @@ class Constructible {
 
 }  // namespace gin_helper
 
-#endif  // SHELL_COMMON_GIN_HELPER_CONSTRUCTIBLE_H_
+#endif  // ELECTRON_SHELL_COMMON_GIN_HELPER_CONSTRUCTIBLE_H_

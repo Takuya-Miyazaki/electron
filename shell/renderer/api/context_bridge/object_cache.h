@@ -2,33 +2,21 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_RENDERER_API_CONTEXT_BRIDGE_OBJECT_CACHE_H_
-#define SHELL_RENDERER_API_CONTEXT_BRIDGE_OBJECT_CACHE_H_
+#ifndef ELECTRON_SHELL_RENDERER_API_CONTEXT_BRIDGE_OBJECT_CACHE_H_
+#define ELECTRON_SHELL_RENDERER_API_CONTEXT_BRIDGE_OBJECT_CACHE_H_
 
-#include <map>
-#include <utility>
+#include <unordered_map>
 
-#include "base/containers/linked_list.h"
-#include "content/public/renderer/render_frame.h"
-#include "content/public/renderer/render_frame_observer.h"
-#include "shell/renderer/electron_render_frame_observer.h"
-#include "third_party/blink/public/web/web_local_frame.h"
+#include "v8/include/v8-local-handle.h"
+#include "v8/include/v8-object.h"
 
-namespace electron {
+namespace electron::api::context_bridge {
 
-namespace api {
-
-namespace context_bridge {
-
-using ObjectCachePair = std::pair<v8::Local<v8::Value>, v8::Local<v8::Value>>;
-
-struct ObjectCachePairNode : public base::LinkNode<ObjectCachePairNode> {
-  explicit ObjectCachePairNode(ObjectCachePair&& pair);
-  ~ObjectCachePairNode();
-
-  ObjectCachePair pair;
-};
-
+/**
+ * NB: This is designed for context_bridge. Beware using it elsewhere!
+ * Since it's a v8::Local-to-v8::Local cache, be careful to destroy it
+ * before destroying the HandleScope that keeps the locals alive.
+ */
 class ObjectCache final {
  public:
   ObjectCache();
@@ -40,14 +28,17 @@ class ObjectCache final {
       v8::Local<v8::Value> from) const;
 
  private:
-  // object_identity ==> [from_value, proxy_value]
-  std::map<int, base::LinkedList<ObjectCachePairNode>> proxy_map_;
+  struct Hash {
+    std::size_t operator()(const v8::Local<v8::Object>& obj) const {
+      return obj->GetIdentityHash();
+    }
+  };
+
+  // from_object ==> proxy_value
+  std::unordered_map<v8::Local<v8::Object>, v8::Local<v8::Value>, Hash>
+      proxy_map_;
 };
 
-}  // namespace context_bridge
+}  // namespace electron::api::context_bridge
 
-}  // namespace api
-
-}  // namespace electron
-
-#endif  // SHELL_RENDERER_API_CONTEXT_BRIDGE_OBJECT_CACHE_H_
+#endif  // ELECTRON_SHELL_RENDERER_API_CONTEXT_BRIDGE_OBJECT_CACHE_H_

@@ -10,6 +10,8 @@
 #include "base/memory/weak_ptr.h"
 #include "base/no_destructor.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/task/sequenced_task_runner.h"
+#include "gin/handle.h"
 #include "mojo/public/cpp/system/data_pipe.h"
 #include "mojo/public/cpp/system/simple_watcher.h"
 #include "net/base/net_errors.h"
@@ -18,9 +20,7 @@
 
 #include "shell/common/node_includes.h"
 
-namespace electron {
-
-namespace api {
+namespace electron::api {
 
 namespace {
 
@@ -42,19 +42,24 @@ class DataPipeReader {
         data_pipe_getter_(std::move(data_pipe_getter)),
         handle_watcher_(FROM_HERE,
                         mojo::SimpleWatcher::ArmingPolicy::MANUAL,
-                        base::SequencedTaskRunnerHandle::Get()) {
+                        base::SequencedTaskRunner::GetCurrentDefault()) {
     // Get a new data pipe and start.
-    mojo::DataPipe data_pipe;
-    data_pipe_getter_->Read(std::move(data_pipe.producer_handle),
+    mojo::ScopedDataPipeProducerHandle producer_handle;
+    CHECK_EQ(mojo::CreateDataPipe(nullptr, producer_handle, data_pipe_),
+             MOJO_RESULT_OK);
+    data_pipe_getter_->Read(std::move(producer_handle),
                             base::BindOnce(&DataPipeReader::ReadCallback,
                                            weak_factory_.GetWeakPtr()));
-    data_pipe_ = std::move(data_pipe.consumer_handle);
     handle_watcher_.Watch(data_pipe_.get(), MOJO_HANDLE_SIGNAL_READABLE,
                           base::BindRepeating(&DataPipeReader::OnHandleReadable,
                                               weak_factory_.GetWeakPtr()));
   }
 
   ~DataPipeReader() = default;
+
+  // disable copy
+  DataPipeReader(const DataPipeReader&) = delete;
+  DataPipeReader& operator=(const DataPipeReader&) = delete;
 
  private:
   // Callback invoked by DataPipeGetter::Read.
@@ -64,7 +69,7 @@ class DataPipeReader {
       return;
     }
     buffer_.resize(size);
-    head_ = &buffer_.front();
+    head_offset_ = 0;
     remaining_size_ = size;
     handle_watcher_.ArmOrNotify();
   }
@@ -78,13 +83,19 @@ class DataPipeReader {
     }
 
     // Read.
-    uint32_t length = remaining_size_;
-    result = data_pipe_->ReadData(head_, &length, MOJO_READ_DATA_FLAG_NONE);
+    size_t length = remaining_size_;
+    result = data_pipe_->ReadData(
+        MOJO_READ_DATA_FLAG_NONE,
+        base::as_writable_byte_span(buffer_).subspan(head_offset_, length),
+        length);
     if (result == MOJO_RESULT_OK) {  // success
       remaining_size_ -= length;
-      head_ += length;
-      if (remaining_size_ == 0)
+      head_offset_ += length;
+      if (remaining_size_ == 0) {
         OnSuccess();
+      } else {
+        handle_watcher_.ArmOrNotify();
+      }
     } else if (result == MOJO_RESULT_SHOULD_WAIT) {  // IO pending
       handle_watcher_.ArmOrNotify();
     } else {  // error
@@ -98,26 +109,18 @@ class DataPipeReader {
   }
 
   void OnSuccess() {
-    // Pass the buffer to JS.
-    //
-    // Note that the lifetime of the native buffer belongs to us, and we will
-    // free memory when JS buffer gets garbage collected.
-    v8::Locker locker(promise_.isolate());
+    // Copy the buffer to JS.
+    // TODO(nornagon): make this zero-copy by allocating the array buffer
+    // inside the sandbox
     v8::HandleScope handle_scope(promise_.isolate());
     v8::Local<v8::Value> buffer =
-        node::Buffer::New(promise_.isolate(), &buffer_.front(), buffer_.size(),
-                          &DataPipeReader::FreeBuffer, this)
+        node::Buffer::Copy(promise_.isolate(), &buffer_.front(), buffer_.size())
             .ToLocalChecked();
     promise_.Resolve(buffer);
 
     // Destroy data pipe.
     handle_watcher_.Cancel();
-    data_pipe_.reset();
-    data_pipe_getter_.reset();
-  }
-
-  static void FreeBuffer(char* data, void* self) {
-    delete static_cast<DataPipeReader*>(self);
+    delete this;
   }
 
   gin_helper::Promise<v8::Local<v8::Value>> promise_;
@@ -130,14 +133,12 @@ class DataPipeReader {
   std::vector<char> buffer_;
 
   // The head of buffer.
-  char* head_ = nullptr;
+  size_t head_offset_ = 0;
 
   // Remaining data to read.
   uint64_t remaining_size_ = 0;
 
   base::WeakPtrFactory<DataPipeReader> weak_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(DataPipeReader);
 };
 
 }  // namespace
@@ -146,7 +147,8 @@ gin::WrapperInfo DataPipeHolder::kWrapperInfo = {gin::kEmbedderNativeGin};
 
 DataPipeHolder::DataPipeHolder(const network::DataElement& element)
     : id_(base::NumberToString(++g_next_id)) {
-  data_pipe_.Bind(element.CloneDataPipeGetter());
+  data_pipe_.Bind(
+      element.As<network::DataElementDataPipe>().CloneDataPipeGetter());
 }
 
 DataPipeHolder::~DataPipeHolder() = default;
@@ -161,6 +163,10 @@ v8::Local<v8::Promise> DataPipeHolder::ReadAll(v8::Isolate* isolate) {
 
   new DataPipeReader(std::move(promise), std::move(data_pipe_));
   return handle;
+}
+
+const char* DataPipeHolder::GetTypeName() {
+  return "DataPipeHolder";
 }
 
 // static
@@ -185,6 +191,4 @@ gin::Handle<DataPipeHolder> DataPipeHolder::From(v8::Isolate* isolate,
   return gin::Handle<DataPipeHolder>();
 }
 
-}  // namespace api
-
-}  // namespace electron
+}  // namespace electron::api

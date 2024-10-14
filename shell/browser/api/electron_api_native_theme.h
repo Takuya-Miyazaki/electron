@@ -2,22 +2,25 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_API_ELECTRON_API_NATIVE_THEME_H_
-#define SHELL_BROWSER_API_ELECTRON_API_NATIVE_THEME_H_
+#ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_NATIVE_THEME_H_
+#define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_NATIVE_THEME_H_
 
-#include "gin/handle.h"
+#include "base/memory/raw_ptr.h"
 #include "gin/wrappable.h"
 #include "shell/browser/event_emitter_mixin.h"
 #include "ui/native_theme/native_theme.h"
 #include "ui/native_theme/native_theme_observer.h"
 
-namespace electron {
+namespace gin {
+template <typename T>
+class handle;
+}  // namespace gin
 
-namespace api {
+namespace electron::api {
 
-class NativeTheme : public gin::Wrappable<NativeTheme>,
-                    public gin_helper::EventEmitterMixin<NativeTheme>,
-                    public ui::NativeThemeObserver {
+class NativeTheme final : public gin::Wrappable<NativeTheme>,
+                          public gin_helper::EventEmitterMixin<NativeTheme>,
+                          private ui::NativeThemeObserver {
  public:
   static gin::Handle<NativeTheme> Create(v8::Isolate* isolate);
 
@@ -27,6 +30,10 @@ class NativeTheme : public gin::Wrappable<NativeTheme>,
       v8::Isolate* isolate) override;
   const char* GetTypeName() override;
 
+  // disable copy
+  NativeTheme(const NativeTheme&) = delete;
+  NativeTheme& operator=(const NativeTheme&) = delete;
+
  protected:
   NativeTheme(v8::Isolate* isolate,
               ui::NativeTheme* ui_theme,
@@ -34,7 +41,7 @@ class NativeTheme : public gin::Wrappable<NativeTheme>,
   ~NativeTheme() override;
 
   void SetThemeSource(ui::NativeTheme::ThemeSource override);
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   void UpdateMacOSAppearanceForOverrideValue(
       ui::NativeTheme::ThemeSource override);
 #endif
@@ -42,21 +49,19 @@ class NativeTheme : public gin::Wrappable<NativeTheme>,
   bool ShouldUseDarkColors();
   bool ShouldUseHighContrastColors();
   bool ShouldUseInvertedColorScheme();
+  bool InForcedColorsMode();
+  bool GetPrefersReducedTransparency();
 
   // ui::NativeThemeObserver:
   void OnNativeThemeUpdated(ui::NativeTheme* theme) override;
   void OnNativeThemeUpdatedOnUI();
 
  private:
-  ui::NativeTheme* ui_theme_;
-  ui::NativeTheme* web_theme_;
-
-  DISALLOW_COPY_AND_ASSIGN(NativeTheme);
+  raw_ptr<ui::NativeTheme> ui_theme_;
+  raw_ptr<ui::NativeTheme> web_theme_;
 };
 
-}  // namespace api
-
-}  // namespace electron
+}  // namespace electron::api
 
 namespace gin {
 
@@ -71,4 +76,4 @@ struct Converter<ui::NativeTheme::ThemeSource> {
 
 }  // namespace gin
 
-#endif  // SHELL_BROWSER_API_ELECTRON_API_NATIVE_THEME_H_
+#endif  // ELECTRON_SHELL_BROWSER_API_ELECTRON_API_NATIVE_THEME_H_

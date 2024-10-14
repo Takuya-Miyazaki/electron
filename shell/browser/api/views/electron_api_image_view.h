@@ -2,17 +2,23 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_API_VIEWS_ELECTRON_API_IMAGE_VIEW_H_
-#define SHELL_BROWSER_API_VIEWS_ELECTRON_API_IMAGE_VIEW_H_
+#ifndef ELECTRON_SHELL_BROWSER_API_VIEWS_ELECTRON_API_IMAGE_VIEW_H_
+#define ELECTRON_SHELL_BROWSER_API_VIEWS_ELECTRON_API_IMAGE_VIEW_H_
 
 #include "gin/handle.h"
 #include "shell/browser/api/electron_api_view.h"
-#include "ui/gfx/image/image.h"
 #include "ui/views/controls/image_view.h"
 
-namespace electron {
+namespace gfx {
+class Image;
+}
 
-namespace api {
+namespace gin_helper {
+class Arguments;
+class WrappableBase;
+}  // namespace gin_helper
+
+namespace electron::api {
 
 class ImageView : public View {
  public:
@@ -30,13 +36,8 @@ class ImageView : public View {
   views::ImageView* image_view() const {
     return static_cast<views::ImageView*>(view());
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(ImageView);
 };
 
-}  // namespace api
+}  // namespace electron::api
 
-}  // namespace electron
-
-#endif  // SHELL_BROWSER_API_VIEWS_ELECTRON_API_IMAGE_VIEW_H_
+#endif  // ELECTRON_SHELL_BROWSER_API_VIEWS_ELECTRON_API_IMAGE_VIEW_H_

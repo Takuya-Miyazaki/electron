@@ -3,18 +3,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-CHROMIUM file.
 
-#ifndef SHELL_BROWSER_UI_INSPECTABLE_WEB_CONTENTS_VIEW_MAC_H_
-#define SHELL_BROWSER_UI_INSPECTABLE_WEB_CONTENTS_VIEW_MAC_H_
+#ifndef ELECTRON_SHELL_BROWSER_UI_INSPECTABLE_WEB_CONTENTS_VIEW_MAC_H_
+#define ELECTRON_SHELL_BROWSER_UI_INSPECTABLE_WEB_CONTENTS_VIEW_MAC_H_
 
 #include "shell/browser/ui/inspectable_web_contents_view.h"
-
-#include "base/mac/scoped_nsobject.h"
 
 @class ElectronInspectableWebContentsView;
 
 namespace electron {
-
-class InspectableWebContents;
 
 class InspectableWebContentsViewMac : public InspectableWebContentsView {
  public:
@@ -26,6 +22,7 @@ class InspectableWebContentsViewMac : public InspectableWebContentsView {
   ~InspectableWebContentsViewMac() override;
 
   gfx::NativeView GetNativeView() const override;
+  void SetCornerRadii(const gfx::RoundedCornersF& corner_radii) override;
   void ShowDevTools(bool activate) override;
   void CloseDevTools() override;
   bool IsDevToolsViewShowing() override;
@@ -33,19 +30,13 @@ class InspectableWebContentsViewMac : public InspectableWebContentsView {
   void SetIsDocked(bool docked, bool activate) override;
   void SetContentsResizingStrategy(
       const DevToolsContentsResizingStrategy& strategy) override;
-  void SetTitle(const base::string16& title) override;
-
-  InspectableWebContents* inspectable_web_contents() {
-    return inspectable_web_contents_;
-  }
+  void SetTitle(const std::u16string& title) override;
+  const std::u16string GetTitle() override;
 
  private:
-  // Owns us.
-  InspectableWebContents* inspectable_web_contents_;
-
-  base::scoped_nsobject<ElectronInspectableWebContentsView> view_;
+  ElectronInspectableWebContentsView* __strong view_;
 };
 
 }  // namespace electron
 
-#endif  // SHELL_BROWSER_UI_INSPECTABLE_WEB_CONTENTS_VIEW_MAC_H_
+#endif  // ELECTRON_SHELL_BROWSER_UI_INSPECTABLE_WEB_CONTENTS_VIEW_MAC_H_

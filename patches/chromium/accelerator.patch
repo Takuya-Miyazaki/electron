@@ -1,86 +1,85 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Cheng Zhao <zcbenz@gmail.com>
 Date: Thu, 4 Oct 2018 14:57:02 -0700
-Subject: accelerator.patch
+Subject: fix: improve shortcut text of Accelerator
 
 This patch makes three changes to Accelerator::GetShortcutText to improve shortcut display text in menus:
 
 1. Ctrl-Alt-<Key> accelerators show as Ctrl-Alt-<Key> instead of as Ctrl-<Key>
 2. F2-F24 accelerators show up as such
-3. Ctrl-Shift-= should show as Ctrl-+
+3. Ctrl-Shift-= and Ctrl-Plus show up as such
 
 diff --git a/ui/base/accelerators/accelerator.cc b/ui/base/accelerators/accelerator.cc
-index 627e077480fe8b19512cbb3e04791041317108eb..ad39d5bf90bb66ed0a21d01b7ff124cc018e96fb 100644
+index dc4bea32e76b41521240ad14e313aa2492539e30..32a3fc0843656eaa87b85dd63ac1ade6d83b6e5b 100644
 --- a/ui/base/accelerators/accelerator.cc
 +++ b/ui/base/accelerators/accelerator.cc
 @@ -12,6 +12,7 @@
+ #include "base/i18n/rtl.h"
  #include "base/notreached.h"
- #include "base/strings/strcat.h"
  #include "base/strings/string_util.h"
 +#include "base/strings/stringprintf.h"
  #include "base/strings/utf_string_conversions.h"
  #include "build/build_config.h"
- #include "ui/base/l10n/l10n_util.h"
-@@ -23,9 +24,7 @@
- #include <windows.h>
+ #include "build/chromeos_buildflags.h"
+@@ -184,6 +185,11 @@ std::u16string Accelerator::GetShortcutText() const {
  #endif
  
--#if !defined(OS_WIN) && (defined(USE_AURA) || defined(OS_APPLE))
- #include "ui/events/keycodes/keyboard_code_conversion.h"
--#endif
- 
- #if defined(OS_CHROMEOS)
- #include "ui/base/ui_base_features.h"
-@@ -204,7 +203,15 @@ base::string16 Accelerator::GetShortcutText() const {
-   shortcut = KeyCodeToName();
- #endif
- 
-+  unsigned int flags = 0;
    if (shortcut.empty()) {
-+    const uint16_t c = DomCodeToUsLayoutCharacter(
-+        UsLayoutKeyboardCodeToDomCode(key_code_), flags);
-+    if (c != 0) {
-+      shortcut =
-+          static_cast<base::string16::value_type>(
-+              base::ToUpperASCII(static_cast<base::char16>(c)));
-+    }
- #if defined(OS_WIN)
++    // When a shifted char is explicitly specified, for example Ctrl+Plus,
++    // use the shifted char directly.
++    if (shifted_char) {
++      shortcut += *shifted_char;
++    } else {
+ #if BUILDFLAG(IS_WIN)
      // Our fallback is to try translate the key code to a regular character
      // unless it is one of digits (VK_0 to VK_9). Some keyboard
-@@ -213,21 +220,14 @@ base::string16 Accelerator::GetShortcutText() const {
-     // accent' for '0'). For display in the menu (e.g. Ctrl-0 for the
-     // default zoom level), we leave VK_[0-9] alone without translation.
-     wchar_t key;
--    if (base::IsAsciiDigit(key_code_))
-+    if (base::IsAsciiDigit(key_code_)) {
-       key = static_cast<wchar_t>(key_code_);
--    else
--      key = LOWORD(::MapVirtualKeyW(key_code_, MAPVK_VK_TO_CHAR));
--    // If there is no translation for the given |key_code_| (e.g.
--    // VKEY_UNKNOWN), |::MapVirtualKeyW| returns 0.
--    if (key != 0)
--      shortcut += key;
--#elif defined(USE_AURA) || defined(OS_APPLE) || defined(OS_ANDROID)
--    const uint16_t c = DomCodeToUsLayoutCharacter(
--        UsLayoutKeyboardCodeToDomCode(key_code_), false);
--    if (c != 0)
--      shortcut +=
--          static_cast<base::string16::value_type>(base::ToUpperASCII(c));
-+      shortcut = key;
-+    }
+@@ -207,6 +213,10 @@ std::u16string Accelerator::GetShortcutText() const {
+       shortcut +=
+           static_cast<std::u16string::value_type>(base::ToUpperASCII(c));
  #endif
++    }
 +    if (key_code_ > VKEY_F1 && key_code_ <= VKEY_F24)
 +      shortcut = base::UTF8ToUTF16(
 +          base::StringPrintf("F%d", key_code_ - VKEY_F1 + 1));
    }
  
- #if defined(OS_APPLE)
-@@ -410,7 +410,7 @@ base::string16 Accelerator::ApplyLongFormModifiers(
+ #if BUILDFLAG(IS_MAC)
+@@ -391,7 +401,7 @@ std::u16string Accelerator::ApplyLongFormModifiers(
+     const std::u16string& shortcut) const {
+   std::u16string result = shortcut;
+ 
+-  if (IsShiftDown())
++  if (!shifted_char && IsShiftDown())
+     result = ApplyModifierToAcceleratorString(result, IDS_APP_SHIFT_KEY);
+ 
+   // Note that we use 'else-if' in order to avoid using Ctrl+Alt as a shortcut.
+@@ -399,7 +409,7 @@ std::u16string Accelerator::ApplyLongFormModifiers(
    // more information.
    if (IsCtrlDown())
-     shortcut = ApplyModifierToAcceleratorString(shortcut, IDS_APP_CTRL_KEY);
+     result = ApplyModifierToAcceleratorString(result, IDS_APP_CTRL_KEY);
 -  else if (IsAltDown())
 +  if (IsAltDown())
-     shortcut = ApplyModifierToAcceleratorString(shortcut, IDS_APP_ALT_KEY);
+     result = ApplyModifierToAcceleratorString(result, IDS_APP_ALT_KEY);
  
    if (IsCmdDown()) {
+diff --git a/ui/base/accelerators/accelerator.h b/ui/base/accelerators/accelerator.h
+index d5fe7062b4d7932782a0b46371f316f8bf9b499d..adfc3b796379c65bd3406374a44b169560ca8795 100644
+--- a/ui/base/accelerators/accelerator.h
++++ b/ui/base/accelerators/accelerator.h
+@@ -16,6 +16,7 @@
+ #include <utility>
+ 
+ #include "base/component_export.h"
++#include "third_party/abseil-cpp/absl/types/optional.h"
+ #include "base/time/time.h"
+ #include "build/build_config.h"
+ #include "ui/events/event_constants.h"
+@@ -130,6 +131,8 @@ class COMPONENT_EXPORT(UI_BASE) Accelerator {
+     return interrupted_by_mouse_event_;
+   }
+ 
++  absl::optional<char16_t> shifted_char;
++
+  private:
+   friend class AcceleratorTestMac;
+   std::u16string ApplyLongFormModifiers(const std::u16string& shortcut) const;

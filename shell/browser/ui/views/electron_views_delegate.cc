@@ -9,17 +9,17 @@
 #include "ui/views/widget/desktop_aura/desktop_native_widget_aura.h"
 #include "ui/views/widget/native_widget_aura.h"
 
-#if defined(OS_LINUX)
+#if BUILDFLAG(IS_LINUX)
 #include "base/environment.h"
 #include "base/nix/xdg_util.h"
-#include "ui/views/linux_ui/linux_ui.h"
+#include "ui/linux/linux_ui.h"
 #endif
 
 namespace {
 
-#if defined(OS_LINUX)
+#if BUILDFLAG(IS_LINUX)
 bool IsDesktopEnvironmentUnity() {
-  std::unique_ptr<base::Environment> env(base::Environment::Create());
+  auto env = base::Environment::Create();
   base::nix::DesktopEnvironment desktop_env =
       base::nix::GetDesktopEnvironment(env.get());
   return desktop_env == base::nix::DESKTOP_ENVIRONMENT_UNITY;
@@ -37,23 +37,24 @@ ViewsDelegate::~ViewsDelegate() = default;
 void ViewsDelegate::SaveWindowPlacement(const views::Widget* window,
                                         const std::string& window_name,
                                         const gfx::Rect& bounds,
-                                        ui::WindowShowState show_state) {}
+                                        ui::mojom::WindowShowState show_state) {
+}
 
 bool ViewsDelegate::GetSavedWindowPlacement(
     const views::Widget* widget,
     const std::string& window_name,
     gfx::Rect* bounds,
-    ui::WindowShowState* show_state) const {
+    ui::mojom::WindowShowState* show_state) const {
   return false;
 }
 
-void ViewsDelegate::NotifyMenuItemFocused(const base::string16& menu_name,
-                                          const base::string16& menu_item_name,
+void ViewsDelegate::NotifyMenuItemFocused(const std::u16string& menu_name,
+                                          const std::u16string& menu_item_name,
                                           int item_index,
                                           int item_count,
                                           bool has_submenu) {}
 
-#if defined(OS_LINUX) && !defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_LINUX) && !BUILDFLAG(IS_CHROMEOS)
 gfx::ImageSkia* ViewsDelegate::GetDefaultWindowIcon() const {
   return nullptr;
 }
@@ -63,10 +64,6 @@ std::unique_ptr<views::NonClientFrameView>
 ViewsDelegate::CreateDefaultNonClientFrameView(views::Widget* widget) {
   return nullptr;
 }
-
-void ViewsDelegate::AddRef() {}
-
-void ViewsDelegate::ReleaseRef() {}
 
 void ViewsDelegate::OnBeforeWidgetInit(
     views::Widget::InitParams* params,
@@ -85,7 +82,7 @@ void ViewsDelegate::OnBeforeWidgetInit(
 }
 
 bool ViewsDelegate::WindowManagerProvidesTitleBar(bool maximized) {
-#if defined(OS_LINUX)
+#if BUILDFLAG(IS_LINUX)
   // On Ubuntu Unity, the system always provides a title bar for maximized
   // windows.
   if (!maximized)

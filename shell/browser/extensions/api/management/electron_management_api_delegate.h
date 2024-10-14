@@ -2,36 +2,33 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_EXTENSIONS_API_MANAGEMENT_ELECTRON_MANAGEMENT_API_DELEGATE_H_
-#define SHELL_BROWSER_EXTENSIONS_API_MANAGEMENT_ELECTRON_MANAGEMENT_API_DELEGATE_H_
+#ifndef ELECTRON_SHELL_BROWSER_EXTENSIONS_API_MANAGEMENT_ELECTRON_MANAGEMENT_API_DELEGATE_H_
+#define ELECTRON_SHELL_BROWSER_EXTENSIONS_API_MANAGEMENT_ELECTRON_MANAGEMENT_API_DELEGATE_H_
 
 #include <memory>
 #include <string>
 
-#include "base/task/cancelable_task_tracker.h"
 #include "extensions/browser/api/management/management_api_delegate.h"
+#include "extensions/common/extension_id.h"
 
 class ElectronManagementAPIDelegate : public extensions::ManagementAPIDelegate {
  public:
   ElectronManagementAPIDelegate();
   ~ElectronManagementAPIDelegate() override;
 
-  // ManagementAPIDelegate.
-  void LaunchAppFunctionDelegate(
+  // extensions::ManagementAPIDelegate
+  bool LaunchAppFunctionDelegate(
       const extensions::Extension* extension,
       content::BrowserContext* context) const override;
   GURL GetFullLaunchURL(const extensions::Extension* extension) const override;
   extensions::LaunchType GetLaunchType(
       const extensions::ExtensionPrefs* prefs,
       const extensions::Extension* extension) const override;
-  void GetPermissionWarningsByManifestFunctionDelegate(
-      extensions::ManagementGetPermissionWarningsByManifestFunction* function,
-      const std::string& manifest_str) const override;
   std::unique_ptr<extensions::InstallPromptDelegate> SetEnabledFunctionDelegate(
       content::WebContents* web_contents,
       content::BrowserContext* browser_context,
       const extensions::Extension* extension,
-      const base::Callback<void(bool)>& callback) const override;
+      base::OnceCallback<void(bool)> callback) const override;
   std::unique_ptr<extensions::UninstallDialogDelegate>
   UninstallFunctionDelegate(
       extensions::ManagementUninstallFunctionBase* function,
@@ -54,33 +51,32 @@ class ElectronManagementAPIDelegate : public extensions::ManagementAPIDelegate {
       const GURL& web_app_url,
       ManagementAPIDelegate::InstallOrLaunchWebAppCallback callback)
       const override;
-  bool CanContextInstallAndroidApps(
-      content::BrowserContext* context) const override;
-  void CheckAndroidAppInstallStatus(
-      const std::string& package_name,
-      ManagementAPIDelegate::AndroidAppInstallStatusCallback callback)
-      const override;
-  void InstallReplacementAndroidApp(
-      const std::string& package_name,
-      ManagementAPIDelegate::InstallAndroidAppCallback callback) const override;
-  void EnableExtension(content::BrowserContext* context,
-                       const std::string& extension_id) const override;
+  void EnableExtension(
+      content::BrowserContext* context,
+      const extensions::ExtensionId& extension_id) const override;
   void DisableExtension(
       content::BrowserContext* context,
       const extensions::Extension* source_extension,
-      const std::string& extension_id,
+      const extensions::ExtensionId& extension_id,
       extensions::disable_reason::DisableReason disable_reason) const override;
   bool UninstallExtension(content::BrowserContext* context,
-                          const std::string& transient_extension_id,
+                          const extensions::ExtensionId& transient_extension_id,
                           extensions::UninstallReason reason,
-                          base::string16* error) const override;
+                          std::u16string* error) const override;
   void SetLaunchType(content::BrowserContext* context,
-                     const std::string& extension_id,
+                     const extensions::ExtensionId& extension_id,
                      extensions::LaunchType launch_type) const override;
   GURL GetIconURL(const extensions::Extension* extension,
                   int icon_size,
-                  ExtensionIconSet::MatchType match,
+                  ExtensionIconSet::Match match,
                   bool grayscale) const override;
+  GURL GetEffectiveUpdateURL(const extensions::Extension& extension,
+                             content::BrowserContext* context) const override;
+  void ShowMv2DeprecationReEnableDialog(
+      content::BrowserContext* context,
+      content::WebContents* web_contents,
+      const extensions::Extension& extension,
+      base::OnceCallback<void(bool)> done_callback) const override;
 };
 
-#endif  // SHELL_BROWSER_EXTENSIONS_API_MANAGEMENT_ELECTRON_MANAGEMENT_API_DELEGATE_H_
+#endif  // ELECTRON_SHELL_BROWSER_EXTENSIONS_API_MANAGEMENT_ELECTRON_MANAGEMENT_API_DELEGATE_H_

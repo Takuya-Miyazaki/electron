@@ -2,12 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_EXTENSIONS_ELECTRON_EXTENSION_SYSTEM_FACTORY_H_
-#define SHELL_BROWSER_EXTENSIONS_ELECTRON_EXTENSION_SYSTEM_FACTORY_H_
+#ifndef ELECTRON_SHELL_BROWSER_EXTENSIONS_ELECTRON_EXTENSION_SYSTEM_FACTORY_H_
+#define ELECTRON_SHELL_BROWSER_EXTENSIONS_ELECTRON_EXTENSION_SYSTEM_FACTORY_H_
 
-#include "base/macros.h"
-#include "base/memory/singleton.h"
+#include <memory>
+
 #include "extensions/browser/extension_system_provider.h"
+
+namespace base {
+template <typename T>
+class NoDestructor;
+}  // namespace base
 
 namespace extensions {
 
@@ -20,22 +25,26 @@ class ElectronExtensionSystemFactory : public ExtensionSystemProvider {
 
   static ElectronExtensionSystemFactory* GetInstance();
 
+  // disable copy
+  ElectronExtensionSystemFactory(const ElectronExtensionSystemFactory&) =
+      delete;
+  ElectronExtensionSystemFactory& operator=(
+      const ElectronExtensionSystemFactory&) = delete;
+
  private:
-  friend struct base::DefaultSingletonTraits<ElectronExtensionSystemFactory>;
+  friend base::NoDestructor<ElectronExtensionSystemFactory>;
 
   ElectronExtensionSystemFactory();
   ~ElectronExtensionSystemFactory() override;
 
   // BrowserContextKeyedServiceFactory implementation:
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* context) const override;
   content::BrowserContext* GetBrowserContextToUse(
       content::BrowserContext* context) const override;
   bool ServiceIsCreatedWithBrowserContext() const override;
-
-  DISALLOW_COPY_AND_ASSIGN(ElectronExtensionSystemFactory);
 };
 
 }  // namespace extensions
 
-#endif  // SHELL_BROWSER_EXTENSIONS_ELECTRON_EXTENSION_SYSTEM_FACTORY_H_
+#endif  // ELECTRON_SHELL_BROWSER_EXTENSIONS_ELECTRON_EXTENSION_SYSTEM_FACTORY_H_

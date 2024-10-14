@@ -4,11 +4,10 @@
 
 #include "shell/browser/electron_web_ui_controller_factory.h"
 
-#include <string>
-
+#include "base/memory/singleton.h"
 #include "chrome/common/webui_url_constants.h"
 #include "content/public/browser/web_contents.h"
-#include "electron/buildflags/buildflags.h"
+#include "content/public/browser/web_ui_controller.h"
 #include "shell/browser/ui/devtools_ui.h"
 #include "shell/browser/ui/webui/accessibility_ui.h"
 
@@ -26,8 +25,9 @@ ElectronWebUIControllerFactory::~ElectronWebUIControllerFactory() = default;
 content::WebUI::TypeID ElectronWebUIControllerFactory::GetWebUIType(
     content::BrowserContext* browser_context,
     const GURL& url) {
-  if (url.host() == chrome::kChromeUIDevToolsHost ||
-      url.host() == chrome::kChromeUIAccessibilityHost) {
+  if (const std::string_view host = url.host_piece();
+      host == chrome::kChromeUIDevToolsHost ||
+      host == chrome::kChromeUIAccessibilityHost) {
     return const_cast<ElectronWebUIControllerFactory*>(this);
   }
 
@@ -40,22 +40,19 @@ bool ElectronWebUIControllerFactory::UseWebUIForURL(
   return GetWebUIType(browser_context, url) != content::WebUI::kNoWebUI;
 }
 
-bool ElectronWebUIControllerFactory::UseWebUIBindingsForURL(
-    content::BrowserContext* browser_context,
-    const GURL& url) {
-  return UseWebUIForURL(browser_context, url);
-}
-
 std::unique_ptr<content::WebUIController>
 ElectronWebUIControllerFactory::CreateWebUIControllerForURL(
     content::WebUI* web_ui,
     const GURL& url) {
-  if (url.host() == chrome::kChromeUIDevToolsHost) {
+  const std::string_view host = url.host_piece();
+
+  if (host == chrome::kChromeUIDevToolsHost) {
     auto* browser_context = web_ui->GetWebContents()->GetBrowserContext();
     return std::make_unique<DevToolsUI>(browser_context, web_ui);
-  } else if (url.host() == chrome::kChromeUIAccessibilityHost) {
-    return std::make_unique<ElectronAccessibilityUI>(web_ui);
   }
+
+  if (host == chrome::kChromeUIAccessibilityHost)
+    return std::make_unique<ElectronAccessibilityUI>(web_ui);
 
   return std::unique_ptr<content::WebUIController>();
 }

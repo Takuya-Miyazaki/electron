@@ -9,10 +9,19 @@
 #include "base/base_switches.h"
 #include "base/command_line.h"
 #include "base/feature_list.h"
+#include "base/metrics/field_trial.h"
+#include "components/spellcheck/common/spellcheck_features.h"
 #include "content/public/common/content_features.h"
 #include "electron/buildflags/buildflags.h"
 #include "media/base/media_switches.h"
 #include "net/base/features.h"
+#include "services/network/public/cpp/features.h"
+#include "third_party/blink/public/common/features.h"
+
+#if BUILDFLAG(IS_MAC)
+#include "content/common/features.h"  // nogncheck
+#include "device/base/features.h"     // nogncheck
+#endif
 
 namespace electron {
 
@@ -27,25 +36,51 @@ void InitializeFeatureList() {
   // Can be reenabled when our site instance policy is aligned with chromium
   // when node integration is enabled.
   disable_features +=
-      std::string(",") + features::kSpareRendererForSitePerProcess.name +
-      // Disable SameSite-by-default, this will be a breaking change for many
-      // apps which cannot land in master until 11-x-y is branched out. For more
-      // info
-      // https://groups.google.com/a/chromium.org/g/embedder-dev/c/4yJi4Twj2NM/m/9bhpWureCAAJ
-      std::string(",") + net::features::kSameSiteByDefaultCookies.name +
-      std::string(",") +
-      net::features::kCookiesWithoutSameSiteMustBeSecure.name;
+      std::string(",") + features::kSpareRendererForSitePerProcess.name;
 
-  // https://www.polymer-project.org/blog/2018-10-02-webcomponents-v0-deprecations
-  // https://chromium-review.googlesource.com/c/chromium/src/+/1869562
-  // Any website which uses older WebComponents will fail in without this
-  // enabled, since Electron does not support origin trials.
-  enable_features += std::string(",") + "WebComponentsV0Enabled";
-
-#if !BUILDFLAG(ENABLE_PICTURE_IN_PICTURE)
-  disable_features += std::string(",") + media::kPictureInPicture.name;
+#if BUILDFLAG(IS_WIN)
+  disable_features +=
+      // Disable async spellchecker suggestions for Windows, which causes
+      // an empty suggestions list to be returned
+      std::string(",") + spellcheck::kWinRetrieveSuggestionsOnlyOnDemand.name +
+      // Delayed spellcheck initialization is causing the
+      // 'custom dictionary word list API' spec to crash.
+      std::string(",") + spellcheck::kWinDelaySpellcheckServiceInit.name;
 #endif
-  base::FeatureList::InitializeInstance(enable_features, disable_features);
+
+#if BUILDFLAG(IS_MAC)
+  // Disable window occlusion checker.
+  disable_features +=
+      std::string(",") + features::kMacWebContentsOcclusion.name;
+#endif
+  std::string platform_specific_enable_features =
+      EnablePlatformSpecificFeatures();
+  if (platform_specific_enable_features.size() > 0) {
+    enable_features += std::string(",") + platform_specific_enable_features;
+  }
+  std::string platform_specific_disable_features =
+      DisablePlatformSpecificFeatures();
+  if (platform_specific_disable_features.size() > 0) {
+    disable_features += std::string(",") + platform_specific_disable_features;
+  }
+  base::FeatureList::InitInstance(enable_features, disable_features);
 }
+
+void InitializeFieldTrials() {
+  auto* cmd_line = base::CommandLine::ForCurrentProcess();
+  auto force_fieldtrials =
+      cmd_line->GetSwitchValueASCII(::switches::kForceFieldTrials);
+
+  base::FieldTrialList::CreateTrialsFromString(force_fieldtrials);
+}
+
+#if !BUILDFLAG(IS_MAC)
+std::string EnablePlatformSpecificFeatures() {
+  return "";
+}
+std::string DisablePlatformSpecificFeatures() {
+  return "";
+}
+#endif
 
 }  // namespace electron

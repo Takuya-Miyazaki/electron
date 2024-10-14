@@ -4,14 +4,14 @@
 
 #include "shell/browser/api/electron_api_notification.h"
 
-#include "base/guid.h"
-#include "base/strings/utf_string_conversions.h"
+#include "base/uuid.h"
 #include "gin/handle.h"
 #include "shell/browser/api/electron_api_menu.h"
 #include "shell/browser/browser.h"
 #include "shell/browser/electron_browser_client.h"
 #include "shell/common/gin_converters/image_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
+#include "shell/common/gin_helper/error_thrower.h"
 #include "shell/common/gin_helper/object_template_builder.h"
 #include "shell/common/node_includes.h"
 #include "url/gurl.h"
@@ -36,7 +36,7 @@ struct Converter<electron::NotificationAction> {
 
   static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
                                    electron::NotificationAction val) {
-    gin::Dictionary dict = gin::Dictionary::CreateEmpty(isolate);
+    auto dict = gin::Dictionary::CreateEmpty(isolate);
     dict.Set("text", val.text);
     dict.Set("type", val.type);
     return ConvertToV8(isolate, dict);
@@ -45,9 +45,7 @@ struct Converter<electron::NotificationAction> {
 
 }  // namespace gin
 
-namespace electron {
-
-namespace api {
+namespace electron::api {
 
 gin::WrapperInfo Notification::kWrapperInfo = {gin::kEmbedderNativeGin};
 
@@ -60,10 +58,7 @@ Notification::Notification(gin::Arguments* args) {
     opts.Get("title", &title_);
     opts.Get("subtitle", &subtitle_);
     opts.Get("body", &body_);
-    has_icon_ = opts.Get("icon", &icon_);
-    if (has_icon_) {
-      opts.Get("icon", &icon_path_);
-    }
+    opts.Get("icon", &icon_);
     opts.Get("silent", &silent_);
     opts.Get("replyPlaceholder", &reply_placeholder_);
     opts.Get("urgency", &urgency_);
@@ -72,6 +67,7 @@ Notification::Notification(gin::Arguments* args) {
     opts.Get("actions", &actions_);
     opts.Get("sound", &sound_);
     opts.Get("closeButtonText", &close_button_text_);
+    opts.Get("toastXml", &toast_xml_);
   }
 }
 
@@ -90,61 +86,16 @@ gin::Handle<Notification> Notification::New(gin_helper::ErrorThrower thrower,
   return gin::CreateHandle(thrower.isolate(), new Notification(args));
 }
 
-// Getters
-base::string16 Notification::GetTitle() const {
-  return title_;
-}
-
-base::string16 Notification::GetSubtitle() const {
-  return subtitle_;
-}
-
-base::string16 Notification::GetBody() const {
-  return body_;
-}
-
-bool Notification::GetSilent() const {
-  return silent_;
-}
-
-bool Notification::GetHasReply() const {
-  return has_reply_;
-}
-
-base::string16 Notification::GetTimeoutType() const {
-  return timeout_type_;
-}
-
-base::string16 Notification::GetReplyPlaceholder() const {
-  return reply_placeholder_;
-}
-
-base::string16 Notification::GetSound() const {
-  return sound_;
-}
-
-base::string16 Notification::GetUrgency() const {
-  return urgency_;
-}
-
-std::vector<electron::NotificationAction> Notification::GetActions() const {
-  return actions_;
-}
-
-base::string16 Notification::GetCloseButtonText() const {
-  return close_button_text_;
-}
-
 // Setters
-void Notification::SetTitle(const base::string16& new_title) {
+void Notification::SetTitle(const std::u16string& new_title) {
   title_ = new_title;
 }
 
-void Notification::SetSubtitle(const base::string16& new_subtitle) {
+void Notification::SetSubtitle(const std::u16string& new_subtitle) {
   subtitle_ = new_subtitle;
 }
 
-void Notification::SetBody(const base::string16& new_body) {
+void Notification::SetBody(const std::u16string& new_body) {
   body_ = new_body;
 }
 
@@ -156,19 +107,19 @@ void Notification::SetHasReply(bool new_has_reply) {
   has_reply_ = new_has_reply;
 }
 
-void Notification::SetTimeoutType(const base::string16& new_timeout_type) {
+void Notification::SetTimeoutType(const std::u16string& new_timeout_type) {
   timeout_type_ = new_timeout_type;
 }
 
-void Notification::SetReplyPlaceholder(const base::string16& new_placeholder) {
+void Notification::SetReplyPlaceholder(const std::u16string& new_placeholder) {
   reply_placeholder_ = new_placeholder;
 }
 
-void Notification::SetSound(const base::string16& new_sound) {
+void Notification::SetSound(const std::u16string& new_sound) {
   sound_ = new_sound;
 }
 
-void Notification::SetUrgency(const base::string16& new_urgency) {
+void Notification::SetUrgency(const std::u16string& new_urgency) {
   urgency_ = new_urgency;
 }
 
@@ -177,8 +128,12 @@ void Notification::SetActions(
   actions_ = actions;
 }
 
-void Notification::SetCloseButtonText(const base::string16& text) {
+void Notification::SetCloseButtonText(const std::u16string& text) {
   close_button_text_ = text;
+}
+
+void Notification::SetToastXml(const std::u16string& new_toast_xml) {
+  toast_xml_ = new_toast_xml;
 }
 
 void Notification::NotificationAction(int index) {
@@ -197,6 +152,10 @@ void Notification::NotificationDisplayed() {
   Emit("show");
 }
 
+void Notification::NotificationFailed(const std::string& error) {
+  Emit("failed", error);
+}
+
 void Notification::NotificationDestroyed() {}
 
 void Notification::NotificationClosed() {
@@ -205,7 +164,11 @@ void Notification::NotificationClosed() {
 
 void Notification::Close() {
   if (notification_) {
-    notification_->Dismiss();
+    if (notification_->is_dismissed()) {
+      notification_->Remove();
+    } else {
+      notification_->Dismiss();
+    }
     notification_->set_delegate(nullptr);
     notification_.reset();
   }
@@ -215,7 +178,8 @@ void Notification::Close() {
 void Notification::Show() {
   Close();
   if (presenter_) {
-    notification_ = presenter_->CreateNotification(this, base::GenerateGUID());
+    notification_ = presenter_->CreateNotification(
+        this, base::Uuid::GenerateRandomV4().AsLowercaseString());
     if (notification_) {
       electron::NotificationOptions options;
       options.title = title_;
@@ -231,6 +195,7 @@ void Notification::Show() {
       options.sound = sound_;
       options.close_button_text = close_button_text_;
       options.urgency = urgency_;
+      options.toast_xml = toast_xml_;
       notification_->Show(options);
     }
   }
@@ -241,36 +206,37 @@ bool Notification::IsSupported() {
                ->GetNotificationPresenter();
 }
 
-v8::Local<v8::ObjectTemplate> Notification::FillObjectTemplate(
-    v8::Isolate* isolate,
-    v8::Local<v8::ObjectTemplate> templ) {
-  return gin::ObjectTemplateBuilder(isolate, "Notification", templ)
+void Notification::FillObjectTemplate(v8::Isolate* isolate,
+                                      v8::Local<v8::ObjectTemplate> templ) {
+  gin::ObjectTemplateBuilder(isolate, GetClassName(), templ)
       .SetMethod("show", &Notification::Show)
       .SetMethod("close", &Notification::Close)
-      .SetProperty("title", &Notification::GetTitle, &Notification::SetTitle)
-      .SetProperty("subtitle", &Notification::GetSubtitle,
+      .SetProperty("title", &Notification::title, &Notification::SetTitle)
+      .SetProperty("subtitle", &Notification::subtitle,
                    &Notification::SetSubtitle)
-      .SetProperty("body", &Notification::GetBody, &Notification::SetBody)
-      .SetProperty("silent", &Notification::GetSilent, &Notification::SetSilent)
-      .SetProperty("hasReply", &Notification::GetHasReply,
+      .SetProperty("body", &Notification::body, &Notification::SetBody)
+      .SetProperty("silent", &Notification::is_silent, &Notification::SetSilent)
+      .SetProperty("hasReply", &Notification::has_reply,
                    &Notification::SetHasReply)
-      .SetProperty("timeoutType", &Notification::GetTimeoutType,
+      .SetProperty("timeoutType", &Notification::timeout_type,
                    &Notification::SetTimeoutType)
-      .SetProperty("replyPlaceholder", &Notification::GetReplyPlaceholder,
+      .SetProperty("replyPlaceholder", &Notification::reply_placeholder,
                    &Notification::SetReplyPlaceholder)
-      .SetProperty("urgency", &Notification::GetUrgency,
-                   &Notification::SetUrgency)
-      .SetProperty("sound", &Notification::GetSound, &Notification::SetSound)
-      .SetProperty("actions", &Notification::GetActions,
-                   &Notification::SetActions)
-      .SetProperty("closeButtonText", &Notification::GetCloseButtonText,
+      .SetProperty("urgency", &Notification::urgency, &Notification::SetUrgency)
+      .SetProperty("sound", &Notification::sound, &Notification::SetSound)
+      .SetProperty("actions", &Notification::actions, &Notification::SetActions)
+      .SetProperty("closeButtonText", &Notification::close_button_text,
                    &Notification::SetCloseButtonText)
+      .SetProperty("toastXml", &Notification::toast_xml,
+                   &Notification::SetToastXml)
       .Build();
 }
 
-}  // namespace api
+const char* Notification::GetTypeName() {
+  return GetClassName();
+}
 
-}  // namespace electron
+}  // namespace electron::api
 
 namespace {
 
@@ -288,4 +254,4 @@ void Initialize(v8::Local<v8::Object> exports,
 
 }  // namespace
 
-NODE_LINKED_MODULE_CONTEXT_AWARE(electron_common_notification, Initialize)
+NODE_LINKED_BINDING_CONTEXT_AWARE(electron_browser_notification, Initialize)

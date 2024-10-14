@@ -1,23 +1,24 @@
-const { hasSwitch } = process._linkedBinding('electron_common_command_line');
 const binding = process._linkedBinding('electron_renderer_context_bridge');
 
-const contextIsolationEnabled = hasSwitch('context-isolation');
-
 const checkContextIsolationEnabled = () => {
-  if (!contextIsolationEnabled) throw new Error('contextBridge API can only be used when contextIsolation is enabled');
+  if (!process.contextIsolated) throw new Error('contextBridge API can only be used when contextIsolation is enabled');
 };
 
 const contextBridge: Electron.ContextBridge = {
-  exposeInMainWorld: (key: string, api: Record<string, any>) => {
+  exposeInMainWorld: (key: string, api: any) => {
     checkContextIsolationEnabled();
-    return binding.exposeAPIInMainWorld(key, api);
+    return binding.exposeAPIInWorld(0, key, api);
+  },
+  exposeInIsolatedWorld: (worldId: number, key: string, api: any) => {
+    checkContextIsolationEnabled();
+    return binding.exposeAPIInWorld(worldId, key, api);
   }
-} as any;
+};
 
 export default contextBridge;
 
 export const internalContextBridge = {
-  contextIsolationEnabled,
+  contextIsolationEnabled: process.contextIsolated,
   overrideGlobalValueFromIsolatedWorld: (keys: string[], value: any) => {
     return binding._overrideGlobalValueFromIsolatedWorld(keys, value, false);
   },

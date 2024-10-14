@@ -6,39 +6,32 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
-#include "base/bind.h"
 #include "base/files/file_path.h"
-#include "base/files/file_util.h"
 #include "base/json/json_string_value_serializer.h"
 #include "base/path_service.h"
-#include "base/task/post_task.h"
+#include "base/values.h"
 #include "chrome/common/chrome_paths.h"
+#include "chrome/grit/browser_resources.h"
+#include "components/value_store/value_store_factory_impl.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
-#include "content/public/browser/notification_details.h"
-#include "content/public/browser/notification_service.h"
-#include "content/public/browser/notification_source.h"
 #include "electron/buildflags/buildflags.h"
 #include "extensions/browser/api/app_runtime/app_runtime_api.h"
 #include "extensions/browser/extension_registry.h"
-#include "extensions/browser/info_map.h"
 #include "extensions/browser/management_policy.h"
-#include "extensions/browser/notification_types.h"
 #include "extensions/browser/null_app_sorting.h"
 #include "extensions/browser/quota_service.h"
-#include "extensions/browser/runtime_data.h"
 #include "extensions/browser/service_worker_manager.h"
-#include "extensions/browser/shared_user_script_manager.h"
-#include "extensions/browser/value_store/value_store_factory_impl.h"
+#include "extensions/browser/user_script_manager.h"
 #include "extensions/common/constants.h"
-#include "extensions/common/file_util.h"
 #include "shell/browser/extensions/electron_extension_loader.h"
 
 #if BUILDFLAG(ENABLE_PDF_VIEWER)
-#include "chrome/browser/pdf/pdf_extension_util.h"
+#include "chrome/browser/pdf/pdf_extension_util.h"  // nogncheck
 #endif
 
 using content::BrowserContext;
@@ -49,15 +42,16 @@ namespace extensions {
 ElectronExtensionSystem::ElectronExtensionSystem(
     BrowserContext* browser_context)
     : browser_context_(browser_context),
-      store_factory_(new ValueStoreFactoryImpl(browser_context->GetPath())),
-      weak_factory_(this) {}
+      store_factory_(base::MakeRefCounted<value_store::ValueStoreFactoryImpl>(
+          browser_context->GetPath())) {}
 
 ElectronExtensionSystem::~ElectronExtensionSystem() = default;
 
 void ElectronExtensionSystem::LoadExtension(
     const base::FilePath& extension_dir,
+    int load_flags,
     base::OnceCallback<void(const Extension*, const std::string&)> cb) {
-  extension_loader_->LoadExtension(extension_dir, std::move(cb));
+  extension_loader_->LoadExtension(extension_dir, load_flags, std::move(cb));
 }
 
 void ElectronExtensionSystem::FinishInitialization() {
@@ -81,11 +75,8 @@ void ElectronExtensionSystem::Shutdown() {
 void ElectronExtensionSystem::InitForRegularProfile(bool extensions_enabled) {
   service_worker_manager_ =
       std::make_unique<ServiceWorkerManager>(browser_context_);
-  runtime_data_ =
-      std::make_unique<RuntimeData>(ExtensionRegistry::Get(browser_context_));
   quota_service_ = std::make_unique<QuotaService>();
-  shared_user_script_manager_ =
-      std::make_unique<SharedUserScriptManager>(browser_context_);
+  user_script_manager_ = std::make_unique<UserScriptManager>(browser_context_);
   app_sorting_ = std::make_unique<NullAppSorting>();
   extension_loader_ =
       std::make_unique<ElectronExtensionLoader>(browser_context_);
@@ -93,43 +84,43 @@ void ElectronExtensionSystem::InitForRegularProfile(bool extensions_enabled) {
   if (!browser_context_->IsOffTheRecord())
     LoadComponentExtensions();
 
-  management_policy_.reset(new ManagementPolicy);
+  management_policy_ = std::make_unique<ManagementPolicy>();
 }
 
-std::unique_ptr<base::DictionaryValue> ParseManifest(
-    base::StringPiece manifest_contents) {
+std::unique_ptr<base::Value::Dict> ParseManifest(
+    const std::string_view manifest_contents) {
   JSONStringValueDeserializer deserializer(manifest_contents);
-  std::unique_ptr<base::Value> manifest = deserializer.Deserialize(NULL, NULL);
+  std::unique_ptr<base::Value> manifest =
+      deserializer.Deserialize(nullptr, nullptr);
 
   if (!manifest.get() || !manifest->is_dict()) {
     LOG(ERROR) << "Failed to parse extension manifest.";
-    return std::unique_ptr<base::DictionaryValue>();
+    return std::unique_ptr<base::Value::Dict>();
   }
-  return base::DictionaryValue::From(std::move(manifest));
+  return std::make_unique<base::Value::Dict>(std::move(*manifest).TakeDict());
 }
 
 void ElectronExtensionSystem::LoadComponentExtensions() {
-#if BUILDFLAG(ENABLE_PDF_VIEWER)
   std::string utf8_error;
+#if BUILDFLAG(ENABLE_PDF_VIEWER)
   std::string pdf_manifest_string = pdf_extension_util::GetManifest();
-  std::unique_ptr<base::DictionaryValue> pdf_manifest =
+  std::unique_ptr<base::Value::Dict> pdf_manifest =
       ParseManifest(pdf_manifest_string);
-  base::FilePath root_directory;
-  CHECK(base::PathService::Get(chrome::DIR_RESOURCES, &root_directory));
-  root_directory = root_directory.Append(FILE_PATH_LITERAL("pdf"));
-  scoped_refptr<const Extension> pdf_extension = extensions::Extension::Create(
-      root_directory, extensions::Manifest::COMPONENT, *pdf_manifest,
-      extensions::Extension::REQUIRE_KEY, &utf8_error);
-  extension_loader_->registrar()->AddExtension(pdf_extension);
+  if (pdf_manifest) {
+    base::FilePath root_directory;
+    CHECK(base::PathService::Get(chrome::DIR_RESOURCES, &root_directory));
+    root_directory = root_directory.Append(FILE_PATH_LITERAL("pdf"));
+    scoped_refptr<const Extension> pdf_extension =
+        extensions::Extension::Create(
+            root_directory, extensions::mojom::ManifestLocation::kComponent,
+            *pdf_manifest, extensions::Extension::REQUIRE_KEY, &utf8_error);
+    extension_loader_->registrar()->AddExtension(pdf_extension);
+  }
 #endif
 }
 
 ExtensionService* ElectronExtensionSystem::extension_service() {
   return nullptr;
-}
-
-RuntimeData* ElectronExtensionSystem::runtime_data() {
-  return runtime_data_.get();
 }
 
 ManagementPolicy* ElectronExtensionSystem::management_policy() {
@@ -140,8 +131,8 @@ ServiceWorkerManager* ElectronExtensionSystem::service_worker_manager() {
   return service_worker_manager_.get();
 }
 
-SharedUserScriptManager* ElectronExtensionSystem::shared_user_script_manager() {
-  return new SharedUserScriptManager(browser_context_);
+UserScriptManager* ElectronExtensionSystem::user_script_manager() {
+  return user_script_manager_.get();
 }
 
 StateStore* ElectronExtensionSystem::state_store() {
@@ -152,14 +143,13 @@ StateStore* ElectronExtensionSystem::rules_store() {
   return nullptr;
 }
 
-scoped_refptr<ValueStoreFactory> ElectronExtensionSystem::store_factory() {
-  return store_factory_;
+StateStore* ElectronExtensionSystem::dynamic_user_scripts_store() {
+  return nullptr;
 }
 
-InfoMap* ElectronExtensionSystem::info_map() {
-  if (!info_map_.get())
-    info_map_ = new InfoMap;
-  return info_map_.get();
+scoped_refptr<value_store::ValueStoreFactory>
+ElectronExtensionSystem::store_factory() {
+  return store_factory_;
 }
 
 QuotaService* ElectronExtensionSystem::quota_service() {
@@ -169,20 +159,6 @@ QuotaService* ElectronExtensionSystem::quota_service() {
 AppSorting* ElectronExtensionSystem::app_sorting() {
   return app_sorting_.get();
 }
-
-void ElectronExtensionSystem::RegisterExtensionWithRequestContexts(
-    const Extension* extension,
-    base::OnceClosure callback) {
-  base::PostTaskAndReply(
-      FROM_HERE, {BrowserThread::IO},
-      base::Bind(&InfoMap::AddExtension, info_map(),
-                 base::RetainedRef(extension), base::Time::Now(), false, false),
-      std::move(callback));
-}
-
-void ElectronExtensionSystem::UnregisterExtensionWithRequestContexts(
-    const std::string& extension_id,
-    const UnloadedExtensionReason reason) {}
 
 const base::OneShotEvent& ElectronExtensionSystem::ready() const {
   return ready_;
@@ -208,19 +184,17 @@ void ElectronExtensionSystem::InstallUpdate(
     bool install_immediately,
     InstallUpdateCallback install_update_callback) {
   NOTREACHED();
-  base::DeletePathRecursively(temp_dir);
 }
 
 bool ElectronExtensionSystem::FinishDelayedInstallationIfReady(
     const std::string& extension_id,
     bool install_immediately) {
   NOTREACHED();
-  return false;
 }
 
 void ElectronExtensionSystem::PerformActionBasedOnOmahaAttributes(
     const std::string& extension_id,
-    const base::Value& attributes) {
+    const base::Value::Dict& attributes) {
   NOTREACHED();
 }
 

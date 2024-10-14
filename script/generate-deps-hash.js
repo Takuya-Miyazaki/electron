@@ -1,15 +1,21 @@
-const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 
 // Fallback to blow away old cache keys
-const HASH_VERSION = 3;
+const FALLBACK_HASH_VERSION = 3;
+
+// Per platform hash versions to bust the cache on different platforms
+const HASH_VERSIONS = {
+  darwin: 3,
+  win32: 4,
+  linux: 3
+};
 
 // Base files to hash
 const filesToHash = [
   path.resolve(__dirname, '../DEPS'),
   path.resolve(__dirname, '../yarn.lock'),
-  path.resolve(__dirname, '../script/external-binaries.json'),
   path.resolve(__dirname, '../script/sysroots.json')
 ];
 
@@ -29,14 +35,17 @@ addAllFiles(path.resolve(__dirname, '../patches'));
 
 // Create Hash
 const hasher = crypto.createHash('SHA256');
-hasher.update(`HASH_VERSION:${HASH_VERSION}`);
+const addToHashAndLog = (s) => {
+  return hasher.update(s);
+};
+addToHashAndLog(`HASH_VERSION:${HASH_VERSIONS[process.platform] || FALLBACK_HASH_VERSION}`);
 for (const file of filesToHash) {
   hasher.update(fs.readFileSync(file));
 }
 
 // Add the GCLIENT_EXTRA_ARGS variable to the hash
 const extraArgs = process.env.GCLIENT_EXTRA_ARGS || 'no_extra_args';
-hasher.update(extraArgs);
+addToHashAndLog(extraArgs);
 
 const effectivePlatform = extraArgs.includes('host_os=mac') ? 'darwin' : process.platform;
 

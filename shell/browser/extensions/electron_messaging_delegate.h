@@ -2,8 +2,8 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_EXTENSIONS_ELECTRON_MESSAGING_DELEGATE_H_
-#define SHELL_BROWSER_EXTENSIONS_ELECTRON_MESSAGING_DELEGATE_H_
+#ifndef ELECTRON_SHELL_BROWSER_EXTENSIONS_ELECTRON_MESSAGING_DELEGATE_H_
+#define ELECTRON_SHELL_BROWSER_EXTENSIONS_ELECTRON_MESSAGING_DELEGATE_H_
 
 #include <memory>
 #include <string>
@@ -18,11 +18,16 @@ class ElectronMessagingDelegate : public MessagingDelegate {
   ElectronMessagingDelegate();
   ~ElectronMessagingDelegate() override;
 
+  // disable copy
+  ElectronMessagingDelegate(const ElectronMessagingDelegate&) = delete;
+  ElectronMessagingDelegate& operator=(const ElectronMessagingDelegate&) =
+      delete;
+
   // MessagingDelegate:
   PolicyPermission IsNativeMessagingHostAllowed(
       content::BrowserContext* browser_context,
       const std::string& native_host_name) override;
-  std::unique_ptr<base::DictionaryValue> MaybeGetTabInfo(
+  std::optional<base::Value::Dict> MaybeGetTabInfo(
       content::WebContents* web_contents) override;
   content::WebContents* GetWebContentsByTabId(
       content::BrowserContext* browser_context,
@@ -32,7 +37,8 @@ class ElectronMessagingDelegate : public MessagingDelegate {
       const std::string& extension_id,
       const PortId& receiver_port_id,
       content::WebContents* receiver_contents,
-      int receiver_frame_id) override;
+      int receiver_frame_id,
+      const std::string& receiver_document_id) override;
   std::unique_ptr<MessagePort> CreateReceiverForNativeApp(
       content::BrowserContext* browser_context,
       base::WeakPtr<MessagePort::ChannelDelegate> channel_delegate,
@@ -45,14 +51,11 @@ class ElectronMessagingDelegate : public MessagingDelegate {
   void QueryIncognitoConnectability(
       content::BrowserContext* context,
       const Extension* extension,
-      content::WebContents* web_contents,
+      content::WebContents* source_contents,
       const GURL& url,
-      const base::Callback<void(bool)>& callback) override;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(ElectronMessagingDelegate);
+      base::OnceCallback<void(bool)> callback) override;
 };
 
 }  // namespace extensions
 
-#endif  // SHELL_BROWSER_EXTENSIONS_ELECTRON_MESSAGING_DELEGATE_H_
+#endif  // ELECTRON_SHELL_BROWSER_EXTENSIONS_ELECTRON_MESSAGING_DELEGATE_H_

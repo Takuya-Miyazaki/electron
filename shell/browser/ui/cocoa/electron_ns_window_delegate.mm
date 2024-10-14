@@ -12,11 +12,14 @@
 #include "shell/browser/native_window_mac.h"
 #include "shell/browser/ui/cocoa/electron_preview_item.h"
 #include "shell/browser/ui/cocoa/electron_touch_bar.h"
+#include "ui/gfx/geometry/resize_utils.h"
 #include "ui/gfx/mac/coordinate_conversion.h"
 #include "ui/views/cocoa/native_widget_mac_ns_window_host.h"
 #include "ui/views/widget/native_widget_mac.h"
 
 using TitleBarStyle = electron::NativeWindowMac::TitleBarStyle;
+using FullScreenTransitionState =
+    electron::NativeWindow::FullScreenTransitionState;
 
 @implementation ElectronNSWindowDelegate
 
@@ -48,10 +51,22 @@ using TitleBarStyle = electron::NativeWindowMac::TitleBarStyle;
 
   // check occlusion binary flag
   if (window.occlusionState & NSWindowOcclusionStateVisible) {
-    // The app is visible
+    // There's a macOS bug where if a child window is minimized, and then both
+    // windows are restored via activation of the parent window, the child
+    // window is not properly deminiaturized. This causes traffic light bugs
+    // like the close and miniaturize buttons having no effect. We need to call
+    // deminiaturize on the child window to fix this. Unfortunately, this also
+    // hits ANOTHER bug where even after calling deminiaturize,
+    // windowDidDeminiaturize is not posted on the child window if it was
+    // incidentally restored by the parent, so we need to manually reset
+    // is_minimized_ here.
+    if (shell_->parent() && is_minimized_) {
+      shell_->Restore();
+      is_minimized_ = false;
+    }
+
     shell_->NotifyWindowShow();
   } else {
-    // The app is not visible
     shell_->NotifyWindowHide();
   }
 }
@@ -60,16 +75,19 @@ using TitleBarStyle = electron::NativeWindowMac::TitleBarStyle;
 // menu to determine the "standard size" of the window.
 - (NSRect)windowWillUseStandardFrame:(NSWindow*)window
                         defaultFrame:(NSRect)frame {
-  if (!shell_->zoom_to_page_width())
+  if (!shell_->zoom_to_page_width()) {
+    if (shell_->aspect_ratio() > 0.0)
+      shell_->set_default_frame_for_zoom(frame);
     return frame;
+  }
 
   // If the shift key is down, maximize.
-  if ([[NSApp currentEvent] modifierFlags] & NSShiftKeyMask)
+  if ([[NSApp currentEvent] modifierFlags] & NSEventModifierFlagShift)
     return frame;
 
   // Get preferred width from observers. Usually the page width.
   int preferred_width = 0;
-  shell_->NotifyWindowRequestPreferredWith(&preferred_width);
+  shell_->NotifyWindowRequestPreferredWidth(&preferred_width);
 
   // Never shrink from the current size on zoom.
   NSRect window_frame = [window frame];
@@ -86,19 +104,25 @@ using TitleBarStyle = electron::NativeWindowMac::TitleBarStyle;
   // Set the width. Don't touch y or height.
   frame.size.width = zoomed_width;
 
+  if (shell_->aspect_ratio() > 0.0)
+    shell_->set_default_frame_for_zoom(frame);
+
   return frame;
 }
 
 - (void)windowDidBecomeMain:(NSNotification*)notification {
   shell_->NotifyWindowFocus();
+  shell_->RedrawTrafficLights();
 }
 
 - (void)windowDidResignMain:(NSNotification*)notification {
   shell_->NotifyWindowBlur();
+  shell_->RedrawTrafficLights();
 }
 
 - (void)windowDidBecomeKey:(NSNotification*)notification {
   shell_->NotifyWindowIsKeyChanged(true);
+  shell_->RedrawTrafficLights();
 }
 
 - (void)windowDidResignKey:(NSNotification*)notification {
@@ -110,21 +134,22 @@ using TitleBarStyle = electron::NativeWindowMac::TitleBarStyle;
     return;
 
   shell_->NotifyWindowIsKeyChanged(false);
+  shell_->RedrawTrafficLights();
 }
 
 - (NSSize)windowWillResize:(NSWindow*)sender toSize:(NSSize)frameSize {
   NSSize newSize = frameSize;
-  double aspectRatio = shell_->GetAspectRatio();
+  NSWindow* window = shell_->GetNativeWindow().GetNativeNSWindow();
 
-  if (aspectRatio > 0.0) {
-    gfx::Size windowSize = shell_->GetSize();
-    gfx::Size contentSize = shell_->GetContentSize();
-    gfx::Size extraSize = shell_->GetAspectRatioExtraSize();
+  if (const double aspectRatio = shell_->aspect_ratio(); aspectRatio > 0.0) {
+    const gfx::Size windowSize = shell_->GetSize();
+    const gfx::Size contentSize = shell_->GetContentSize();
+    const gfx::Size extraSize = shell_->aspect_ratio_extra_size();
 
+    double titleBarHeight = windowSize.height() - contentSize.height();
     double extraWidthPlusFrame =
         windowSize.width() - contentSize.width() + extraSize.width();
-    double extraHeightPlusFrame =
-        windowSize.height() - contentSize.height() + extraSize.height();
+    double extraHeightPlusFrame = titleBarHeight + extraSize.height();
 
     newSize.width =
         roundf((frameSize.height - extraHeightPlusFrame) * aspectRatio +
@@ -132,6 +157,47 @@ using TitleBarStyle = electron::NativeWindowMac::TitleBarStyle;
     newSize.height =
         roundf((newSize.width - extraWidthPlusFrame) / aspectRatio +
                extraHeightPlusFrame);
+
+    // Clamp to minimum width/height while ensuring aspect ratio remains.
+    NSSize minSize = [window minSize];
+    NSSize zeroSize =
+        shell_->has_frame() ? NSMakeSize(0, titleBarHeight) : NSZeroSize;
+    if (!NSEqualSizes(minSize, zeroSize)) {
+      double minWidthForAspectRatio =
+          (minSize.height - titleBarHeight) * aspectRatio;
+      bool atMinHeight =
+          minSize.height > zeroSize.height && newSize.height <= minSize.height;
+      newSize.width = atMinHeight ? minWidthForAspectRatio
+                                  : std::max(newSize.width, minSize.width);
+
+      double minHeightForAspectRatio = minSize.width / aspectRatio;
+      bool atMinWidth =
+          minSize.width > zeroSize.width && newSize.width <= minSize.width;
+      newSize.height = atMinWidth ? minHeightForAspectRatio
+                                  : std::max(newSize.height, minSize.height);
+    }
+
+    // Clamp to maximum width/height while ensuring aspect ratio remains.
+    NSSize maxSize = [window maxSize];
+    if (!NSEqualSizes(maxSize, NSMakeSize(FLT_MAX, FLT_MAX))) {
+      double maxWidthForAspectRatio = maxSize.height * aspectRatio;
+      bool atMaxHeight =
+          maxSize.height < FLT_MAX && newSize.height >= maxSize.height;
+      newSize.width = atMaxHeight ? maxWidthForAspectRatio
+                                  : std::min(newSize.width, maxSize.width);
+
+      double maxHeightForAspectRatio = maxSize.width / aspectRatio;
+      bool atMaxWidth =
+          maxSize.width < FLT_MAX && newSize.width >= maxSize.width;
+      newSize.height = atMaxWidth ? maxHeightForAspectRatio
+                                  : std::min(newSize.height, maxSize.height);
+    }
+  }
+
+  if (!resizingHorizontally_) {
+    const auto widthDelta = frameSize.width - [window frame].size.width;
+    const auto heightDelta = frameSize.height - [window frame].size.height;
+    resizingHorizontally_ = std::abs(widthDelta) > std::abs(heightDelta);
   }
 
   {
@@ -139,6 +205,9 @@ using TitleBarStyle = electron::NativeWindowMac::TitleBarStyle;
     NSRect new_bounds = NSMakeRect(sender.frame.origin.x, sender.frame.origin.y,
                                    newSize.width, newSize.height);
     shell_->NotifyWindowWillResize(gfx::ScreenRectFromNSRect(new_bounds),
+                                   *resizingHorizontally_
+                                       ? gfx::ResizeEdge::kRight
+                                       : gfx::ResizeEdge::kBottom,
                                    &prevent_default);
     if (prevent_default) {
       return sender.frame.size;
@@ -151,9 +220,7 @@ using TitleBarStyle = electron::NativeWindowMac::TitleBarStyle;
 - (void)windowDidResize:(NSNotification*)notification {
   [super windowDidResize:notification];
   shell_->NotifyWindowResize();
-  if (shell_->title_bar_style() == TitleBarStyle::HIDDEN) {
-    shell_->RedrawTrafficLights();
-  }
+  shell_->RedrawTrafficLights();
 }
 
 - (void)windowWillMove:(NSNotification*)notification {
@@ -182,15 +249,24 @@ using TitleBarStyle = electron::NativeWindowMac::TitleBarStyle;
   // windowDidDeminiaturize
   level_ = [window level];
   shell_->SetWindowLevel(NSNormalWindowLevel);
+  shell_->UpdateWindowOriginalFrame();
+  shell_->DetachChildren();
 }
 
 - (void)windowDidMiniaturize:(NSNotification*)notification {
   [super windowDidMiniaturize:notification];
+  is_minimized_ = true;
+
+  shell_->set_wants_to_be_visible(false);
   shell_->NotifyWindowMinimize();
 }
 
 - (void)windowDidDeminiaturize:(NSNotification*)notification {
   [super windowDidDeminiaturize:notification];
+  is_minimized_ = false;
+
+  shell_->set_wants_to_be_visible(true);
+  shell_->AttachChildren();
   shell_->SetWindowLevel(level_);
   shell_->NotifyWindowRestore();
 }
@@ -201,6 +277,8 @@ using TitleBarStyle = electron::NativeWindowMac::TitleBarStyle;
 }
 
 - (void)windowDidEndLiveResize:(NSNotification*)notification {
+  resizingHorizontally_.reset();
+  shell_->NotifyWindowResized();
   if (is_zooming_) {
     if (shell_->IsMaximized())
       shell_->NotifyWindowMaximize();
@@ -211,78 +289,60 @@ using TitleBarStyle = electron::NativeWindowMac::TitleBarStyle;
 }
 
 - (void)windowWillEnterFullScreen:(NSNotification*)notification {
-  // Setting resizable to true before entering fullscreen
-  is_resizable_ = shell_->IsResizable();
+  // Store resizable mask so it can be restored after exiting fullscreen.
+  is_resizable_ = shell_->HasStyleMask(NSWindowStyleMaskResizable);
+
+  shell_->set_fullscreen_transition_state(FullScreenTransitionState::kEntering);
+
+  shell_->NotifyWindowWillEnterFullScreen();
+
+  // Set resizable to true before entering fullscreen.
   shell_->SetResizable(true);
-  // Hide the native toolbar before entering fullscreen, so there is no visual
-  // artifacts.
-  if (shell_->title_bar_style() == TitleBarStyle::HIDDEN_INSET) {
-    NSWindow* window = shell_->GetNativeWindow().GetNativeNSWindow();
-    [window setToolbar:nil];
-  }
 }
 
 - (void)windowDidEnterFullScreen:(NSNotification*)notification {
+  shell_->set_fullscreen_transition_state(FullScreenTransitionState::kNone);
+
   shell_->NotifyWindowEnterFullScreen();
 
-  // For frameless window we don't show set title for normal mode since the
-  // titlebar is expected to be empty, but after entering fullscreen mode we
-  // have to set one, because title bar is visible here.
-  NSWindow* window = shell_->GetNativeWindow().GetNativeNSWindow();
-  if ((shell_->transparent() || !shell_->has_frame()) &&
-      // FIXME(zcbenz): Showing titlebar for hiddenInset window is weird under
-      // fullscreen mode.
-      // Show title if fullscreen_window_title flag is set
-      (shell_->title_bar_style() != TitleBarStyle::HIDDEN_INSET ||
-       shell_->fullscreen_window_title())) {
-    [window setTitleVisibility:NSWindowTitleVisible];
-  }
+  if (shell_->HandleDeferredClose())
+    return;
 
-  // Restore the native toolbar immediately after entering fullscreen, if we
-  // do this before leaving fullscreen, traffic light buttons will be jumping.
-  if (shell_->title_bar_style() == TitleBarStyle::HIDDEN_INSET) {
-    base::scoped_nsobject<NSToolbar> toolbar(
-        [[NSToolbar alloc] initWithIdentifier:@"titlebarStylingToolbar"]);
-    [toolbar setShowsBaselineSeparator:NO];
-    [window setToolbar:toolbar];
+  shell_->HandlePendingFullscreenTransitions();
+}
 
-    // Set window style to hide the toolbar, otherwise the toolbar will show
-    // in fullscreen mode.
-    [window setTitlebarAppearsTransparent:NO];
-    shell_->SetStyleMask(true, NSWindowStyleMaskFullSizeContentView);
-  }
+- (void)windowDidFailToEnterFullScreen:(NSWindow*)window {
+  shell_->set_fullscreen_transition_state(FullScreenTransitionState::kNone);
+
+  shell_->SetResizable(is_resizable_);
+  shell_->NotifyWindowDidFailToEnterFullScreen();
+
+  if (shell_->HandleDeferredClose())
+    return;
+
+  shell_->HandlePendingFullscreenTransitions();
 }
 
 - (void)windowWillExitFullScreen:(NSNotification*)notification {
-  // Restore the titlebar visibility.
-  NSWindow* window = shell_->GetNativeWindow().GetNativeNSWindow();
-  if ((shell_->transparent() || !shell_->has_frame()) &&
-      (shell_->title_bar_style() != TitleBarStyle::HIDDEN_INSET ||
-       shell_->fullscreen_window_title())) {
-    [window setTitleVisibility:NSWindowTitleHidden];
-  }
+  shell_->set_fullscreen_transition_state(FullScreenTransitionState::kExiting);
 
-  // Turn off the style for toolbar.
-  if (shell_->title_bar_style() == TitleBarStyle::HIDDEN_INSET) {
-    shell_->SetStyleMask(false, NSWindowStyleMaskFullSizeContentView);
-    [window setTitlebarAppearsTransparent:YES];
-  }
-  shell_->SetExitingFullScreen(true);
-  if (shell_->title_bar_style() == TitleBarStyle::HIDDEN) {
-    shell_->RedrawTrafficLights();
-  }
+  shell_->NotifyWindowWillLeaveFullScreen();
 }
 
 - (void)windowDidExitFullScreen:(NSNotification*)notification {
+  shell_->set_fullscreen_transition_state(FullScreenTransitionState::kNone);
+
   shell_->SetResizable(is_resizable_);
   shell_->NotifyWindowLeaveFullScreen();
-  shell_->SetExitingFullScreen(false);
-  if (shell_->title_bar_style() == TitleBarStyle::HIDDEN) {
-    shell_->RedrawTrafficLights();
-  }
+
+  if (shell_->HandleDeferredClose())
+    return;
+
+  shell_->HandlePendingFullscreenTransitions();
 }
 
 - (void)windowWillClose:(NSNotification*)notification {
+  shell_->Cleanup();
   shell_->NotifyWindowClosed();
 
   // Something called -[NSWindow close] on a sheet rather than calling
@@ -292,10 +352,10 @@ using TitleBarStyle = electron::NativeWindowMac::TitleBarStyle;
   if (shell_->is_modal() && shell_->parent() && shell_->IsVisible()) {
     NSWindow* window = shell_->GetNativeWindow().GetNativeNSWindow();
     NSWindow* sheetParent = [window sheetParent];
-    base::ThreadTaskRunnerHandle::Get()->PostTask(
-        FROM_HERE, base::BindOnce(base::RetainBlock(^{
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, base::BindOnce(^{
           [sheetParent endSheet:window];
-        })));
+        }));
   }
 
   // Clears the delegate when window is going to be closed, since EL Capitan it
@@ -338,8 +398,7 @@ using TitleBarStyle = electron::NativeWindowMac::TitleBarStyle;
 #pragma mark - NSTouchBarDelegate
 
 - (NSTouchBarItem*)touchBar:(NSTouchBar*)touchBar
-      makeItemForIdentifier:(NSTouchBarItemIdentifier)identifier
-    API_AVAILABLE(macosx(10.12.2)) {
+      makeItemForIdentifier:(NSTouchBarItemIdentifier)identifier {
   if (touchBar && shell_->touch_bar())
     return [shell_->touch_bar() makeItemForIdentifier:identifier];
   else

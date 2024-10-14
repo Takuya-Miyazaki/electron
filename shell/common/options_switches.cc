@@ -29,7 +29,18 @@ const char kFullScreenable[] = "fullscreenable";
 const char kClosable[] = "closable";
 const char kFullscreen[] = "fullscreen";
 const char kTrafficLightPosition[] = "trafficLightPosition";
+const char kRoundedCorners[] = "roundedCorners";
 
+// The color to use as the theme and symbol colors respectively for Window
+// Controls Overlay if enabled on Windows.
+const char kOverlayButtonColor[] = "color";
+const char kOverlaySymbolColor[] = "symbolColor";
+
+// The custom height for Window Controls Overlay.
+const char kOverlayHeight[] = "height";
+
+// whether to keep the window out of mission control
+const char kHiddenInMissionControl[] = "hiddenInMissionControl";
 // Whether the window should show in taskbar.
 const char kSkipTaskbar[] = "skipTaskbar";
 
@@ -50,9 +61,6 @@ const char kUseContentSize[] = "useContentSize";
 
 // Whether window zoom should be to page width.
 const char kZoomToPageWidth[] = "zoomToPageWidth";
-
-// Whether always show title text in full screen is enabled.
-const char kFullscreenWindowTitle[] = "fullscreenWindowTitle";
 
 // The requested title bar style for the window
 const char kTitleBarStyle[] = "titleBarStyle";
@@ -78,9 +86,6 @@ const char kType[] = "type";
 // Disable auto-hiding cursor.
 const char kDisableAutoHideCursor[] = "disableAutoHideCursor";
 
-// Use the macOS' standard window instead of the textured window.
-const char kStandardWindow[] = "standardWindow";
-
 // Default browser window background color.
 const char kBackgroundColor[] = "backgroundColor";
 
@@ -99,6 +104,9 @@ const char kWebPreferences[] = "webPreferences";
 // Add a vibrancy effect to the browser window
 const char kVibrancyType[] = "vibrancy";
 
+// Add a vibrancy effect to the browser window.
+const char kBackgroundMaterial[] = "backgroundMaterial";
+
 // Specify how the material appearance should reflect window activity state on
 // macOS.
 const char kVisualEffectState[] = "visualEffectState";
@@ -109,26 +117,14 @@ const char kZoomFactor[] = "zoomFactor";
 // Script that will be loaded by guest WebContents before other scripts.
 const char kPreloadScript[] = "preload";
 
-// Like --preload, but the passed argument is an URL.
-const char kPreloadURL[] = "preloadURL";
-
 // Enable the node integration.
 const char kNodeIntegration[] = "nodeIntegration";
 
 // Enable context isolation of Electron APIs and preload script
 const char kContextIsolation[] = "contextIsolation";
 
-// Enable world safe passing of values when using "executeJavaScript"
-const char kWorldSafeExecuteJavaScript[] = "worldSafeExecuteJavaScript";
-
-// Instance ID of guest WebContents.
-const char kGuestInstanceID[] = "guestInstanceId";
-
 // Web runtime features.
 const char kExperimentalFeatures[] = "experimentalFeatures";
-
-// Opener window's ID.
-const char kOpenerID[] = "openerId";
 
 // Enable the rubber banding effect.
 const char kScrollBounce[] = "scrollBounce";
@@ -145,8 +141,6 @@ const char kNodeIntegrationInWorker[] = "nodeIntegrationInWorker";
 // Enable the web view tag.
 const char kWebviewTag[] = "webviewTag";
 
-const char kNativeWindowOpen[] = "nativeWindowOpen";
-
 const char kCustomArgs[] = "additionalArguments";
 
 const char kPlugins[] = "plugins";
@@ -158,6 +152,8 @@ const char kWebSecurity[] = "webSecurity";
 const char kAllowRunningInsecureContent[] = "allowRunningInsecureContent";
 
 const char kOffscreen[] = "offscreen";
+
+const char kUseSharedTexture[] = "useSharedTexture";
 
 const char kNodeIntegrationInSubFrames[] = "nodeIntegrationInSubFrames";
 
@@ -181,15 +177,15 @@ const char kWebGL[] = "webgl";
 // navigation.
 const char kNavigateOnDragDrop[] = "navigateOnDragDrop";
 
+const char kHiddenPage[] = "hiddenPage";
+
 #if BUILDFLAG(ENABLE_BUILTIN_SPELLCHECKER)
 const char kSpellcheck[] = "spellcheck";
 #endif
 
-#if BUILDFLAG(ENABLE_REMOTE_MODULE)
-const char kEnableRemoteModule[] = "enableRemoteModule";
-#endif
+const char kEnablePreferredSizeMode[] = "enablePreferredSizeMode";
 
-const char kEnableWebSQL[] = "enableWebSQL";
+const char ktitleBarOverlay[] = "titleBarOverlay";
 
 }  // namespace options
 
@@ -197,15 +193,6 @@ namespace switches {
 
 // Enable chromium sandbox.
 const char kEnableSandbox[] = "enable-sandbox";
-
-// Enable plugins.
-const char kEnablePlugins[] = "enable-plugins";
-
-// Ppapi Flash path.
-const char kPpapiFlashPath[] = "ppapi-flash-path";
-
-// Ppapi Flash version.
-const char kPpapiFlashVersion[] = "ppapi-flash-version";
 
 // Disable HTTP cache.
 const char kDisableHttpCache[] = "disable-http-cache";
@@ -231,41 +218,20 @@ const char kCORSSchemes[] = "cors-schemes";
 // Register schemes as streaming responses.
 const char kStreamingSchemes[] = "streaming-schemes";
 
+// Register schemes as supporting V8 code cache.
+const char kCodeCacheSchemes[] = "code-cache-schemes";
+
 // The browser process app model ID
 const char kAppUserModelId[] = "app-user-model-id";
 
 // The application path
 const char kAppPath[] = "app-path";
 
-const char kEnableApiFilteringLogging[] = "enable-api-filtering-logging";
-
 // The command line switch versions of the options.
-const char kBackgroundColor[] = "background-color";
-const char kPreloadScript[] = "preload";
-const char kPreloadScripts[] = "preload-scripts";
-const char kNodeIntegration[] = "node-integration";
-const char kContextIsolation[] = "context-isolation";
-const char kWorldSafeExecuteJavaScript[] = "world-safe-execute-javascript";
-const char kGuestInstanceID[] = "guest-instance-id";
-const char kOpenerID[] = "opener-id";
 const char kScrollBounce[] = "scroll-bounce";
-const char kHiddenPage[] = "hidden-page";
-const char kNativeWindowOpen[] = "native-window-open";
-const char kWebviewTag[] = "webview-tag";
-const char kDisableElectronSiteInstanceOverrides[] =
-    "disable-electron-site-instance-overrides";
-const char kEnableNodeLeakageInRenderers[] = "enable-node-leakage-in-renderers";
 
 // Command switch passed to renderer process to control nodeIntegration.
 const char kNodeIntegrationInWorker[] = "node-integration-in-worker";
-
-// Command switch passed to renderer process to control whether node
-// environments will be created in sub-frames.
-const char kNodeIntegrationInSubFrames[] = "node-integration-in-subframes";
-
-// Command switch passed to render process to control whether WebSQL api
-// is allowed.
-const char kEnableWebSQL[] = "enable-websql";
 
 // Widevine options
 // Path to Widevine CDM binaries.
@@ -291,16 +257,6 @@ const char kEnableAuthNegotiatePort[] = "enable-auth-negotiate-port";
 
 // If set, NTLM v2 is disabled for POSIX platforms.
 const char kDisableNTLMv2[] = "disable-ntlm-v2";
-
-#if BUILDFLAG(ENABLE_BUILTIN_SPELLCHECKER)
-const char kEnableSpellcheck[] = "enable-spellcheck";
-#endif
-
-#if BUILDFLAG(ENABLE_REMOTE_MODULE)
-const char kEnableRemoteModule[] = "enable-remote-module";
-#endif
-
-const char kGlobalCrashKeys[] = "global-crash-keys";
 
 }  // namespace switches
 

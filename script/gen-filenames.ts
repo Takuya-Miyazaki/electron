@@ -1,7 +1,7 @@
-import * as cp from 'child_process';
-import * as fs from 'fs-extra';
-import * as os from 'os';
-import * as path from 'path';
+import * as cp from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 const rootPath = path.resolve(__dirname, '..');
 const gniPath = path.resolve(__dirname, '../filenames.auto.gni');
@@ -38,17 +38,24 @@ const main = async () => {
       config: 'webpack.config.worker.js'
     },
     {
-      name: 'asar_bundle_deps',
-      config: 'webpack.config.asar.js'
+      name: 'node_bundle_deps',
+      config: 'webpack.config.node.js'
+    },
+    {
+      name: 'utility_bundle_deps',
+      config: 'webpack.config.utility.js'
     }
   ];
 
   const webpackTargetsWithDeps = await Promise.all(webpackTargets.map(async webpackTarget => {
-    const tmpDir = await fs.mkdtemp(path.resolve(os.tmpdir(), 'electron-filenames-'));
+    const tmpDir = await fs.promises.mkdtemp(path.resolve(os.tmpdir(), 'electron-filenames-'));
     const child = cp.spawn('node', [
-      'build/webpack/get-outputs.js',
-      `./${webpackTarget.config}`,
-      path.resolve(tmpDir, `${webpackTarget.name}.measure.js`)
+      './node_modules/webpack-cli/bin/cli.js',
+      '--config', `./build/webpack/${webpackTarget.config}`,
+      '--stats', 'errors-only',
+      '--output-path', tmpDir,
+      '--output-filename', `${webpackTarget.name}.measure.js`,
+      '--env', 'PRINT_WEBPACK_GRAPH'
     ], {
       cwd: path.resolve(__dirname, '..')
     });
@@ -57,7 +64,7 @@ const main = async () => {
       output += chunk.toString();
     });
     child.stderr.on('data', chunk => console.error(chunk.toString()));
-    await new Promise((resolve, reject) => child.on('exit', (code) => {
+    await new Promise<void>((resolve, reject) => child.on('exit', (code) => {
       if (code !== 0) {
         console.error(output);
         return reject(new Error(`Failed to list webpack dependencies for entry: ${webpackTarget.name}`));
@@ -82,7 +89,7 @@ const main = async () => {
         // Make the generated list easier to read
         .sort()
     };
-    await fs.remove(tmpDir);
+    await fs.promises.rm(tmpDir, { force: true, recursive: true });
     return webpackTargetWithDeps;
   }));
 
@@ -101,7 +108,7 @@ ${target.dependencies.map(dep => `    "${dep}",`).join('\n')}
 `);
 };
 
-if (process.mainModule === module) {
+if (require.main === module) {
   main().catch((err) => {
     console.error(err);
     process.exit(1);

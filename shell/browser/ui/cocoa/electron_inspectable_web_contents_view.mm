@@ -5,10 +5,12 @@
 #include "shell/browser/ui/cocoa/electron_inspectable_web_contents_view.h"
 
 #include "content/public/browser/render_widget_host_view.h"
+#include "shell/browser/api/electron_api_web_contents.h"
 #include "shell/browser/ui/cocoa/event_dispatching_window.h"
 #include "shell/browser/ui/inspectable_web_contents.h"
 #include "shell/browser/ui/inspectable_web_contents_view_delegate.h"
 #include "shell/browser/ui/inspectable_web_contents_view_mac.h"
+#include "ui/base/cocoa/base_view.h"
 #include "ui/gfx/mac/scoped_cocoa_disable_screen_updates.h"
 
 @implementation ElectronInspectableWebContentsView
@@ -23,21 +25,10 @@
   devtools_visible_ = NO;
   devtools_docked_ = NO;
   devtools_is_first_responder_ = NO;
+  attached_to_window_ = NO;
 
-  [[NSNotificationCenter defaultCenter]
-      addObserver:self
-         selector:@selector(viewDidBecomeFirstResponder:)
-             name:kViewDidBecomeFirstResponder
-           object:nil];
-
-  [[NSNotificationCenter defaultCenter]
-      addObserver:self
-         selector:@selector(parentWindowBecameMain:)
-             name:NSWindowDidBecomeMainNotification
-           object:nil];
-
-  if (inspectableWebContentsView_->inspectable_web_contents()->IsGuest()) {
-    fake_view_.reset([[NSView alloc] init]);
+  if (inspectableWebContentsView_->inspectable_web_contents()->is_guest()) {
+    fake_view_ = [[NSView alloc] init];
     [fake_view_ setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
     [self addSubview:fake_view_];
   } else {
@@ -54,12 +45,31 @@
   return self;
 }
 
-- (void)removeObservers {
+- (void)dealloc {
   [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 - (void)resizeSubviewsWithOldSize:(NSSize)oldBoundsSize {
   [self adjustSubviews];
+}
+
+- (void)viewDidMoveToWindow {
+  if (attached_to_window_ && !self.window) {
+    attached_to_window_ = NO;
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+  } else if (!attached_to_window_ && self.window) {
+    attached_to_window_ = YES;
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self
+           selector:@selector(viewDidBecomeFirstResponder:)
+               name:kViewDidBecomeFirstResponder
+             object:nil];
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self
+           selector:@selector(parentWindowBecameMain:)
+               name:NSWindowDidBecomeMainNotification
+             object:nil];
+  }
 }
 
 - (IBAction)showDevTools:(id)sender {
@@ -69,6 +79,26 @@
 - (void)notifyDevToolsFocused {
   if (inspectableWebContentsView_->GetDelegate())
     inspectableWebContentsView_->GetDelegate()->DevToolsFocused();
+}
+
+- (void)setCornerRadii:(CGFloat)cornerRadius {
+  auto* inspectable_web_contents =
+      inspectableWebContentsView_->inspectable_web_contents();
+  DCHECK(inspectable_web_contents);
+  auto* webContents = inspectable_web_contents->GetWebContents();
+  if (!webContents)
+    return;
+  auto* webContentsView = webContents->GetNativeView().GetNativeNSView();
+  webContentsView.wantsLayer = YES;
+  webContentsView.layer.cornerRadius = cornerRadius;
+}
+
+- (void)notifyDevToolsResized {
+  // When devtools is opened, resizing devtools would not trigger
+  // UpdateDraggableRegions for WebContents, so we have to notify the window
+  // to do an update of draggable regions.
+  if (inspectableWebContentsView_->GetDelegate())
+    inspectableWebContentsView_->GetDelegate()->DevToolsResized();
 }
 
 - (void)setDevToolsVisible:(BOOL)visible activate:(BOOL)activate {
@@ -95,6 +125,7 @@
       gfx::ScopedCocoaDisableScreenUpdates disabler;
       [devToolsView removeFromSuperview];
       [self adjustSubviews];
+      [self notifyDevToolsResized];
     }
   } else {
     if (visible) {
@@ -106,7 +137,7 @@
     } else {
       [devtools_window_ setDelegate:nil];
       [devtools_window_ close];
-      devtools_window_.reset();
+      devtools_window_ = nil;
     }
   }
 }
@@ -123,28 +154,33 @@
   }
 }
 
+// TODO: remove NSWindowStyleMaskTexturedBackground.
+// https://github.com/electron/electron/issues/43125
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
 - (void)setIsDocked:(BOOL)docked activate:(BOOL)activate {
   // Revert to no-devtools state.
   [self setDevToolsVisible:NO activate:NO];
 
   // Switch to new state.
   devtools_docked_ = docked;
+  auto* inspectable_web_contents =
+      inspectableWebContentsView_->inspectable_web_contents();
+  auto* devToolsWebContents =
+      inspectable_web_contents->GetDevToolsWebContents();
+  auto devToolsView = devToolsWebContents->GetNativeView().GetNativeNSView();
   if (!docked) {
-    auto* inspectable_web_contents =
-        inspectableWebContentsView_->inspectable_web_contents();
-    auto* devToolsWebContents =
-        inspectable_web_contents->GetDevToolsWebContents();
-    auto devToolsView = devToolsWebContents->GetNativeView().GetNativeNSView();
-
     auto styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                     NSMiniaturizableWindowMask | NSWindowStyleMaskResizable |
-                     NSTexturedBackgroundWindowMask |
+                     NSWindowStyleMaskMiniaturizable |
+                     NSWindowStyleMaskResizable |
+                     NSWindowStyleMaskTexturedBackground |
                      NSWindowStyleMaskUnifiedTitleAndToolbar;
-    devtools_window_.reset([[EventDispatchingWindow alloc]
+    devtools_window_ = [[EventDispatchingWindow alloc]
         initWithContentRect:NSMakeRect(0, 0, 800, 600)
                   styleMask:styleMask
                     backing:NSBackingStoreBuffered
-                      defer:YES]);
+                      defer:YES];
     [devtools_window_ setDelegate:self];
     [devtools_window_ setFrameAutosaveName:@"electron.devtools"];
     [devtools_window_ setTitle:@"Developer Tools"];
@@ -158,9 +194,15 @@
     devToolsView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
     [contentView addSubview:devToolsView];
+    [devToolsView setMouseDownCanMoveWindow:NO];
+  } else {
+    [devToolsView setMouseDownCanMoveWindow:YES];
   }
   [self setDevToolsVisible:YES activate:activate];
 }
+
+// -Wdeprecated-declarations
+#pragma clang diagnostic pop
 
 - (void)setContentsResizingStrategy:
     (const DevToolsContentsResizingStrategy&)strategy {
@@ -191,18 +233,44 @@
       &new_devtools_bounds, &new_contents_bounds);
   [devToolsView setFrame:[self flipRectToNSRect:new_devtools_bounds]];
   [contentsView setFrame:[self flipRectToNSRect:new_contents_bounds]];
+
+  // Move mask to the devtools area to exclude it from dragging.
+  NSRect cf = contentsView.frame;
+  NSRect sb = [self bounds];
+  NSRect devtools_frame;
+  if (cf.size.height < sb.size.height) {  // bottom docked
+    devtools_frame.origin.x = 0;
+    devtools_frame.origin.y = 0;
+    devtools_frame.size.width = sb.size.width;
+    devtools_frame.size.height = sb.size.height - cf.size.height;
+  } else {                // left or right docked
+    if (cf.origin.x > 0)  // left docked
+      devtools_frame.origin.x = 0;
+    else  // right docked.
+      devtools_frame.origin.x = cf.size.width;
+    devtools_frame.origin.y = 0;
+    devtools_frame.size.width = sb.size.width - cf.size.width;
+    devtools_frame.size.height = sb.size.height;
+  }
+
+  [self notifyDevToolsResized];
 }
 
 - (void)setTitle:(NSString*)title {
   [devtools_window_ setTitle:title];
 }
 
+- (NSString*)getTitle {
+  return [devtools_window_ title];
+}
+
 - (void)viewDidBecomeFirstResponder:(NSNotification*)notification {
   auto* inspectable_web_contents =
       inspectableWebContentsView_->inspectable_web_contents();
-  if (!inspectable_web_contents || inspectable_web_contents->IsGuest())
-    return;
+  DCHECK(inspectable_web_contents);
   auto* webContents = inspectable_web_contents->GetWebContents();
+  if (!webContents)
+    return;
   auto* webContentsView = webContents->GetNativeView().GetNativeNSView();
 
   NSView* view = [notification object];
@@ -228,6 +296,29 @@
   if ([self window] == parentWindow && devtools_docked_ &&
       devtools_is_first_responder_)
     [self notifyDevToolsFocused];
+}
+
+- (void)redispatchContextMenuEvent:(base::apple::OwnedNSEvent)event {
+  DCHECK(event.Get().type == NSEventTypeRightMouseDown ||
+         (event.Get().type == NSEventTypeLeftMouseDown &&
+          (event.Get().modifierFlags & NSEventModifierFlagControl)));
+  content::WebContents* contents =
+      inspectableWebContentsView_->inspectable_web_contents()->GetWebContents();
+  electron::api::WebContents* api_contents =
+      electron::api::WebContents::From(contents);
+  if (api_contents) {
+    // Temporarily pretend that the WebContents is fully non-draggable while we
+    // re-send the mouse event. This allows the re-dispatched event to "land"
+    // on the WebContents, instead of "falling through" back to the window.
+    auto* rwhv = contents->GetRenderWidgetHostView();
+    if (rwhv) {
+      api_contents->SetForceNonDraggable(true);
+      BaseView* contentsView =
+          (BaseView*)rwhv->GetNativeView().GetNativeNSView();
+      [contentsView mouseEvent:event.Get()];
+      api_contents->SetForceNonDraggable(false);
+    }
+  }
 }
 
 #pragma mark - NSWindowDelegate

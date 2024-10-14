@@ -5,12 +5,12 @@
 Process: [Renderer](../glossary.md#renderer-process)
 
 `webFrame` export of the Electron module is an instance of the `WebFrame`
-class representing the top frame of the current `BrowserWindow`. Sub-frames can
-be retrieved by certain properties and methods (e.g. `webFrame.firstChild`).
+class representing the current frame. Sub-frames can be retrieved by
+certain properties and methods (e.g. `webFrame.firstChild`).
 
 An example of zooming current page to 200%.
 
-```javascript
+```js
 const { webFrame } = require('electron')
 
 webFrame.setZoomFactor(2)
@@ -31,11 +31,11 @@ The factor must be greater than 0.0.
 
 ### `webFrame.getZoomFactor()`
 
-Returns `Number` - The current zoom factor.
+Returns `number` - The current zoom factor.
 
 ### `webFrame.setZoomLevel(level)`
 
-* `level` Number - Zoom level.
+* `level` number - Zoom level.
 
 Changes the zoom level to the specified level. The original size is 0 and each
 increment above or below represents zooming 20% larger or smaller to default
@@ -47,12 +47,12 @@ limits of 300% and 50% of original size, respectively.
 
 ### `webFrame.getZoomLevel()`
 
-Returns `Number` - The current zoom level.
+Returns `number` - The current zoom level.
 
 ### `webFrame.setVisualZoomLevelLimits(minimumLevel, maximumLevel)`
 
-* `minimumLevel` Number
-* `maximumLevel` Number
+* `minimumLevel` number
+* `maximumLevel` number
 
 Sets the maximum and minimum pinch-to-zoom level.
 
@@ -62,14 +62,19 @@ Sets the maximum and minimum pinch-to-zoom level.
 > webFrame.setVisualZoomLevelLimits(1, 3)
 > ```
 
+> **NOTE**: Visual zoom only applies to pinch-to-zoom behavior. Cmd+/-/0 zoom shortcuts are
+> controlled by the 'zoomIn', 'zoomOut', and 'resetZoom' MenuItem roles in the application
+> Menu. To disable shortcuts, manually [define the Menu](./menu.md#examples) and omit zoom roles
+> from the definition.
+
 ### `webFrame.setSpellCheckProvider(language, provider)`
 
-* `language` String
+* `language` string
 * `provider` Object
   * `spellCheck` Function
-    * `words` String[]
+    * `words` string[]
     * `callback` Function
-      * `misspeltWords` String[]
+      * `misspeltWords` string[]
 
 Sets a provider for spell checking in input fields and text areas.
 
@@ -91,13 +96,12 @@ with an array of misspelt words when complete.
 
 An example of using [node-spellchecker][spellchecker] as provider:
 
-```javascript
+```js @ts-expect-error=[2,6]
 const { webFrame } = require('electron')
 const spellChecker = require('spellchecker')
 webFrame.setSpellCheckProvider('en-US', {
   spellCheck (words, callback) {
     setTimeout(() => {
-      const spellchecker = require('spellchecker')
       const misspelled = words.filter(x => spellchecker.isMisspelled(x))
       callback(misspelled)
     }, 0)
@@ -105,11 +109,13 @@ webFrame.setSpellCheckProvider('en-US', {
 })
 ```
 
-### `webFrame.insertCSS(css)`
+### `webFrame.insertCSS(css[, options])`
 
-* `css` String - CSS source code.
+* `css` string
+* `options` Object (optional)
+  * `cssOrigin` string (optional) - Can be 'user' or 'author'. Sets the [cascade origin](https://www.w3.org/TR/css3-cascade/#cascade-origin) of the inserted stylesheet. Default is 'author'.
 
-Returns `String` - A key for the inserted CSS that can later be used to remove
+Returns `string` - A key for the inserted CSS that can later be used to remove
 the CSS via `webFrame.removeInsertedCSS(key)`.
 
 Injects CSS into the current web page and returns a unique key for the inserted
@@ -117,21 +123,21 @@ stylesheet.
 
 ### `webFrame.removeInsertedCSS(key)`
 
-* `key` String
+* `key` string
 
 Removes the inserted CSS from the current web page. The stylesheet is identified
 by its key, which is returned from `webFrame.insertCSS(css)`.
 
 ### `webFrame.insertText(text)`
 
-* `text` String
+* `text` string
 
 Inserts `text` to the focused element.
 
 ### `webFrame.executeJavaScript(code[, userGesture, callback])`
 
-* `code` String
-* `userGesture` Boolean (optional) - Default is `false`.
+* `code` string
+* `userGesture` boolean (optional) - Default is `false`.
 * `callback` Function (optional) - Called after script has been executed. Unless
   the frame is suspended (e.g. showing a modal alert), execution will be
   synchronous and the callback will be invoked before the method returns. For
@@ -156,7 +162,7 @@ this limitation.
             world used by Electron's `contextIsolation` feature. Accepts values
             in the range 1..536870911.
 * `scripts` [WebSource[]](structures/web-source.md)
-* `userGesture` Boolean (optional) - Default is `false`.
+* `userGesture` boolean (optional) - Default is `false`.
 * `callback` Function (optional) - Called after script has been executed. Unless
   the frame is suspended (e.g. showing a modal alert), execution will be
   synchronous and the callback will be invoked before the method returns.  For
@@ -175,11 +181,12 @@ reject and the `result` would be `undefined`. This is because Chromium does not
 dispatch errors of isolated worlds to foreign worlds.
 
 ### `webFrame.setIsolatedWorldInfo(worldId, info)`
+
 * `worldId` Integer - The ID of the world to run the javascript in, `0` is the default world, `999` is the world used by Electrons `contextIsolation` feature. Chrome extensions reserve the range of IDs in `[1 << 20, 1 << 29)`. You can provide any integer here.
 * `info` Object
-  * `securityOrigin` String (optional) - Security origin for the isolated world.
-  * `csp` String (optional) - Content Security Policy for the isolated world.
-  * `name` String (optional) - Name for isolated world. Useful in devtools.
+  * `securityOrigin` string (optional) - Security origin for the isolated world.
+  * `csp` string (optional) - Content Security Policy for the isolated world.
+  * `name` string (optional) - Name for isolated world. Useful in devtools.
 
 Set the security origin, content security policy and name of the isolated world.
 Note: If the `csp` is specified, then the `securityOrigin` also has to be specified.
@@ -198,14 +205,14 @@ Returns `Object`:
 Returns an object describing usage information of Blink's internal memory
 caches.
 
-```javascript
+```js
 const { webFrame } = require('electron')
 console.log(webFrame.getResourceUsage())
 ```
 
 This will generate:
 
-```javascript
+```js
 {
   images: {
     count: 22,
@@ -234,7 +241,7 @@ and intend to stay there).
 
 ### `webFrame.getFrameForSelector(selector)`
 
-* `selector` String - CSS selector for a frame element.
+* `selector` string - CSS selector for a frame element.
 
 Returns `WebFrame` - The frame element in `webFrame's` document selected by
 `selector`, `null` would be returned if `selector` does not select a frame or
@@ -242,7 +249,7 @@ if the frame is not in the current renderer process.
 
 ### `webFrame.findFrameByName(name)`
 
-* `name` String
+* `name` string
 
 Returns `WebFrame` - A child of `webFrame` with the supplied `name`, `null`
 would be returned if there's no such frame or if the frame is not in the current
@@ -256,6 +263,20 @@ renderer process.
    specific `WebContents` navigation events (e.g. `did-frame-navigate`)
 
 Returns `WebFrame` - that has the supplied `routingId`, `null` if not found.
+
+### `webFrame.isWordMisspelled(word)`
+
+* `word` string - The word to be spellchecked.
+
+Returns `boolean` - True if the word is misspelled according to the built in
+spellchecker, false otherwise. If no dictionary is loaded, always return false.
+
+### `webFrame.getWordSuggestions(word)`
+
+* `word` string - The misspelled word.
+
+Returns `string[]` - A list of suggested words for a given word. If the word
+is spelled correctly, the result will be empty.
 
 ## Properties
 

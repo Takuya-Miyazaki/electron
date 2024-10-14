@@ -1,8 +1,10 @@
-import { app, deprecate } from 'electron/main';
+import * as deprecate from '@electron/internal/common/deprecate';
+
+import { app } from 'electron/main';
 
 const binding = process._linkedBinding('electron_browser_crash_reporter');
 
-class CrashReporter {
+class CrashReporter implements Electron.CrashReporter {
   start (options: Electron.CrashReporterStartOptions) {
     const {
       productName = app.name,
@@ -10,15 +12,15 @@ class CrashReporter {
       extra = {},
       globalExtra = {},
       ignoreSystemCrashHandler = false,
-      submitURL,
+      submitURL = '',
       uploadToServer = true,
       rateLimit = false,
       compress = true
     } = options || {};
 
-    if (submitURL == null) throw new Error('submitURL is a required option to crashReporter.start');
+    if (uploadToServer && !submitURL) throw new Error('submitURL must be specified when uploadToServer is true');
 
-    if (!compress) {
+    if (!compress && uploadToServer) {
       deprecate.log('Sending uncompressed crash reports is deprecated and will be removed in a future version of Electron. Set { compress: true } to opt-in to the new behavior. Crash reports will be uploaded gzipped, which most crash reporting servers support.');
     }
 
@@ -49,10 +51,6 @@ class CrashReporter {
 
   getUploadedReports (): Electron.CrashReport[] {
     return binding.getUploadedReports();
-  }
-
-  getCrashesDirectory () {
-    return app.getPath('crashDumps');
   }
 
   getUploadToServer () {

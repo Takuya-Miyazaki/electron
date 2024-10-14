@@ -7,17 +7,21 @@
 #include <dlfcn.h>
 #include <glib-object.h>
 
-#include "base/logging.h"
+#include "base/functional/bind.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
-#include "chrome/browser/ui/views/frame/global_menu_bar_registrar_x11.h"
 #include "shell/browser/native_window_views.h"
 #include "shell/browser/ui/electron_menu_model.h"
+#include "shell/browser/ui/views/global_menu_bar_registrar_x11.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/base/accelerators/menu_label_accelerator_util_linux.h"
 #include "ui/events/keycodes/keyboard_code_conversion_x.h"
-#include "ui/gfx/x/x11.h"
+#include "ui/events/keycodes/keysym_to_unicode.h"
+#include "ui/gfx/x/connection.h"
+#include "ui/gfx/x/event.h"
+#include "ui/gfx/x/keysyms/keysyms.h"
+#include "ui/gfx/x/xproto.h"
 
 // libdbusmenu-glib types
 typedef struct _DbusmenuMenuitem DbusmenuMenuitem;
@@ -139,7 +143,7 @@ ElectronMenuModel* ModelForMenuItem(DbusmenuMenuitem* item) {
       g_object_get_data(G_OBJECT(item), "model"));
 }
 
-bool GetMenuItemID(DbusmenuMenuitem* item, int* id) {
+bool GetMenuItemID(DbusmenuMenuitem* item, size_t* id) {
   gpointer id_ptr = g_object_get_data(G_OBJECT(item), "menu-id");
   if (id_ptr != nullptr) {
     *id = GPOINTER_TO_INT(id_ptr) - 1;
@@ -158,7 +162,7 @@ void SetMenuItemID(DbusmenuMenuitem* item, int id) {
 
 std::string GetMenuModelStatus(ElectronMenuModel* model) {
   std::string ret;
-  for (int i = 0; i < model->GetItemCount(); ++i) {
+  for (size_t i = 0; i < model->GetItemCount(); ++i) {
     int status = model->GetTypeAt(i) | (model->IsVisibleAt(i) << 3) |
                  (model->IsEnabledAt(i) << 4) |
                  (model->IsItemCheckedAt(i) << 5);
@@ -190,7 +194,8 @@ GlobalMenuBarX11::~GlobalMenuBarX11() {
 
 // static
 std::string GlobalMenuBarX11::GetPathForWindow(x11::Window window) {
-  return base::StringPrintf("/com/canonical/menu/%X", window);
+  return base::StringPrintf("/com/canonical/menu/%X",
+                            static_cast<uint>(window));
 }
 
 void GlobalMenuBarX11::SetMenu(ElectronMenuModel* menu_model) {
@@ -227,7 +232,14 @@ void GlobalMenuBarX11::OnWindowUnmapped() {
 
 void GlobalMenuBarX11::BuildMenuFromModel(ElectronMenuModel* model,
                                           DbusmenuMenuitem* parent) {
-  for (int i = 0; i < model->GetItemCount(); ++i) {
+  auto connect = [&](auto* sender, const char* detailed_signal, auto receiver) {
+    // Unretained() is safe since GlobalMenuBarX11 will own the
+    // ScopedGSignal.
+    signals_.emplace_back(
+        sender, detailed_signal,
+        base::BindRepeating(receiver, base::Unretained(this)));
+  };
+  for (size_t i = 0; i < model->GetItemCount(); ++i) {
     DbusmenuMenuitem* item = menuitem_new();
     menuitem_property_set_bool(item, kPropertyVisible, model->IsVisibleAt(i));
 
@@ -245,15 +257,13 @@ void GlobalMenuBarX11::BuildMenuFromModel(ElectronMenuModel* model,
 
       if (type == ElectronMenuModel::TYPE_SUBMENU) {
         menuitem_property_set(item, kPropertyChildrenDisplay, kDisplaySubmenu);
-        g_signal_connect(item, "about-to-show", G_CALLBACK(OnSubMenuShowThunk),
-                         this);
+        connect(item, "about-to-show", &GlobalMenuBarX11::OnSubMenuShow);
       } else {
         ui::Accelerator accelerator;
         if (model->GetAcceleratorAtWithParams(i, true, &accelerator))
           RegisterAccelerator(item, accelerator);
 
-        g_signal_connect(item, "item-activated",
-                         G_CALLBACK(OnItemActivatedThunk), this);
+        connect(item, "item-activated", &GlobalMenuBarX11::OnItemActivated);
 
         if (type == ElectronMenuModel::TYPE_CHECK ||
             type == ElectronMenuModel::TYPE_RADIO) {
@@ -286,13 +296,14 @@ void GlobalMenuBarX11::RegisterAccelerator(DbusmenuMenuitem* item,
   if (accelerator.IsShiftDown())
     g_variant_builder_add(&builder, "s", "Shift");
 
-  char* name =
-      XKeysymToString(XKeysymForWindowsKeyCode(accelerator.key_code(), false));
-  if (!name) {
+  uint16_t keysym = ui::GetUnicodeCharacterFromXKeySym(
+      XKeysymForWindowsKeyCode(accelerator.key_code(), false));
+  if (!keysym) {
     NOTIMPLEMENTED();
     return;
   }
-  g_variant_builder_add(&builder, "s", name);
+  std::string name = base::UTF16ToUTF8(std::u16string(1, keysym));
+  g_variant_builder_add(&builder, "s", name.c_str());
 
   GVariant* inside_array = g_variant_builder_end(&builder);
   g_variant_builder_init(&builder, G_VARIANT_TYPE_ARRAY);
@@ -304,14 +315,14 @@ void GlobalMenuBarX11::RegisterAccelerator(DbusmenuMenuitem* item,
 
 void GlobalMenuBarX11::OnItemActivated(DbusmenuMenuitem* item,
                                        unsigned int timestamp) {
-  int id;
+  size_t id;
   ElectronMenuModel* model = ModelForMenuItem(item);
   if (model && GetMenuItemID(item, &id))
     model->ActivatedAt(id, 0);
 }
 
 void GlobalMenuBarX11::OnSubMenuShow(DbusmenuMenuitem* item) {
-  int id;
+  size_t id;
   ElectronMenuModel* model = ModelForMenuItem(item);
   if (!model || !GetMenuItemID(item, &id))
     return;

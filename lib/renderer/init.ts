@@ -1,6 +1,21 @@
-import * as path from 'path';
+import { IPC_MESSAGES } from '@electron/internal/common/ipc-messages';
+import type * as ipcRendererInternalModule from '@electron/internal/renderer/ipc-renderer-internal';
+import type * as ipcRendererUtilsModule from '@electron/internal/renderer/ipc-renderer-internal-utils';
 
-const Module = require('module');
+import * as path from 'path';
+import { pathToFileURL } from 'url';
+
+const Module = require('module') as NodeJS.ModuleInternal;
+
+// We do not want to allow use of the VM module in the renderer process as
+// it conflicts with Blink's V8::Context internal logic.
+const originalModuleLoad = Module._load;
+Module._load = function (request: string) {
+  if (request === 'vm') {
+    console.warn('The vm module of Node.js is deprecated in the renderer process and will be removed.');
+  }
+  return originalModuleLoad.apply(this, arguments as any);
+};
 
 // Make sure globals like "process" and "global" are always available in preload
 // scripts even after they are deleted in "loaded" script.
@@ -28,90 +43,29 @@ Module.wrapper = [
 // init.js, we need to restore it here.
 process.argv.splice(1, 1);
 
-// Clear search paths.
-
-require('../common/reset-search-paths');
-
 // Import common settings.
 require('@electron/internal/common/init');
 
-// The global variable will be used by ipc for event dispatching
-const v8Util = process._linkedBinding('electron_common_v8_util');
+const { ipcRendererInternal } = require('@electron/internal/renderer/ipc-renderer-internal') as typeof ipcRendererInternalModule;
+const ipcRendererUtils = require('@electron/internal/renderer/ipc-renderer-internal-utils') as typeof ipcRendererUtilsModule;
 
-const { ipcRendererInternal } = require('@electron/internal/renderer/ipc-renderer-internal');
-const ipcRenderer = require('@electron/internal/renderer/api/ipc-renderer').default;
-
-v8Util.setHiddenValue(global, 'ipcNative', {
-  onMessage (internal: boolean, channel: string, ports: any[], args: any[], senderId: number) {
-    const sender = internal ? ipcRendererInternal : ipcRenderer;
-    sender.emit(channel, { sender, senderId, ports }, ...args);
-  }
-});
-
-// Use electron module after everything is ready.
-const { webFrameInit } = require('@electron/internal/renderer/web-frame-init');
-webFrameInit();
+process.getProcessMemoryInfo = () => {
+  return ipcRendererInternal.invoke<Electron.ProcessMemoryInfo>(IPC_MESSAGES.BROWSER_GET_PROCESS_MEMORY_INFO);
+};
 
 // Process command line arguments.
 const { hasSwitch, getSwitchValue } = process._linkedBinding('electron_common_command_line');
+const { mainFrame } = process._linkedBinding('electron_renderer_web_frame');
 
-const parseOption = function<T> (
-  name: string, defaultValue: T, converter?: (value: string) => T
-) {
-  return hasSwitch(name)
-    ? (
-      converter
-        ? converter(getSwitchValue(name))
-        : getSwitchValue(name)
-    )
-    : defaultValue;
-};
+const nodeIntegration = mainFrame.getWebPreference('nodeIntegration');
+const appPath = hasSwitch('app-path') ? getSwitchValue('app-path') : null;
 
-const contextIsolation = hasSwitch('context-isolation');
-const nodeIntegration = hasSwitch('node-integration');
-const webviewTag = hasSwitch('webview-tag');
-const isHiddenPage = hasSwitch('hidden-page');
-const usesNativeWindowOpen = hasSwitch('native-window-open');
-const rendererProcessReuseEnabled = hasSwitch('disable-electron-site-instance-overrides');
-
-const preloadScript = parseOption('preload', null);
-const preloadScripts = parseOption('preload-scripts', [], value => value.split(path.delimiter)) as string[];
-const appPath = parseOption('app-path', null);
-const guestInstanceId = parseOption('guest-instance-id', null, value => parseInt(value));
-const openerId = parseOption('opener-id', null, value => parseInt(value));
-
-// The webContents preload script is loaded after the session preload scripts.
-if (preloadScript) {
-  preloadScripts.push(preloadScript);
-}
-
-switch (window.location.protocol) {
-  case 'devtools:': {
-    // Override some inspector APIs.
-    require('@electron/internal/renderer/inspector');
-    break;
-  }
-  case 'chrome-extension:': {
-    break;
-  }
-  case 'chrome:':
-    break;
-  default: {
-    // Override default web functions.
-    const { windowSetup } = require('@electron/internal/renderer/window-setup');
-    windowSetup(guestInstanceId, openerId, isHiddenPage, usesNativeWindowOpen, rendererProcessReuseEnabled);
-  }
-}
-
-// Load webview tag implementation.
-if (process.isMainFrame) {
-  const { webViewInit } = require('@electron/internal/renderer/web-view/web-view-init');
-  webViewInit(contextIsolation, webviewTag, guestInstanceId);
-}
+// Common renderer initialization
+require('@electron/internal/renderer/common-init');
 
 if (nodeIntegration) {
   // Export node bindings to global.
-  const { makeRequireFunction } = __non_webpack_require__('internal/modules/cjs/helpers') // eslint-disable-line
+  const { makeRequireFunction } = __non_webpack_require__('internal/modules/helpers');
   global.module = new Module('electron/js2c/renderer_init');
   global.require = makeRequireFunction(global.module);
 
@@ -154,7 +108,7 @@ if (nodeIntegration) {
       // We do not want to add `uncaughtException` to our definitions
       // because we don't want anyone else (anywhere) to throw that kind
       // of error.
-      global.process.emit('uncaughtException' as any, error as any);
+      global.process.emit('uncaughtException', error as any);
       return true;
     } else {
       return false;
@@ -163,7 +117,7 @@ if (nodeIntegration) {
 } else {
   // Delete Node's symbols after the Environment has been loaded in a
   // non context-isolated environment
-  if (!contextIsolation) {
+  if (!process.contextIsolated) {
     process.once('loaded', function () {
       delete (global as any).process;
       delete (global as any).Buffer;
@@ -176,20 +130,39 @@ if (nodeIntegration) {
   }
 }
 
-// Load the preload scripts.
-for (const preloadScript of preloadScripts) {
-  try {
-    Module._load(preloadScript);
-  } catch (error) {
-    console.error(`Unable to load preload script: ${preloadScript}`);
-    console.error(error);
+const { appCodeLoaded } = process;
+delete process.appCodeLoaded;
 
-    ipcRendererInternal.send('ELECTRON_BROWSER_PRELOAD_ERROR', preloadScript, error);
+const { preloadPaths } = ipcRendererUtils.invokeSync<{ preloadPaths: string[] }>(IPC_MESSAGES.BROWSER_NONSANDBOX_LOAD);
+const cjsPreloads = preloadPaths.filter(p => path.extname(p) !== '.mjs');
+const esmPreloads = preloadPaths.filter(p => path.extname(p) === '.mjs');
+if (cjsPreloads.length) {
+  // Load the preload scripts.
+  for (const preloadScript of cjsPreloads) {
+    try {
+      Module._load(preloadScript);
+    } catch (error) {
+      console.error(`Unable to load preload script: ${preloadScript}`);
+      console.error(error);
+
+      ipcRendererInternal.send(IPC_MESSAGES.BROWSER_PRELOAD_ERROR, preloadScript, error);
+    }
   }
 }
+if (esmPreloads.length) {
+  const { runEntryPointWithESMLoader } = __non_webpack_require__('internal/modules/run_main');
 
-// Warn about security issues
-if (process.isMainFrame) {
-  const { securityWarnings } = require('@electron/internal/renderer/security-warnings');
-  securityWarnings(nodeIntegration);
+  runEntryPointWithESMLoader(async (cascadedLoader: any) => {
+    // Load the preload scripts.
+    for (const preloadScript of esmPreloads) {
+      await cascadedLoader.import(pathToFileURL(preloadScript).toString(), undefined, Object.create(null)).catch((err: Error) => {
+        console.error(`Unable to load preload script: ${preloadScript}`);
+        console.error(err);
+
+        ipcRendererInternal.send(IPC_MESSAGES.BROWSER_PRELOAD_ERROR, preloadScript, err);
+      });
+    }
+  }).finally(() => appCodeLoaded!());
+} else {
+  appCodeLoaded!();
 }

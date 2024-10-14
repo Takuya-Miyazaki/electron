@@ -3,8 +3,8 @@
 The source code of Electron is separated into a few parts, mostly
 following Chromium on the separation conventions.
 
-You may need to become familiar with [Chromium's multi-process
-architecture](https://dev.chromium.org/developers/design-documents/multi-process-architecture)
+You may need to become familiar with
+[Chromium's multi-process architecture](https://dev.chromium.org/developers/design-documents/multi-process-architecture)
 to understand the source code better.
 
 ## Structure of Source Code
@@ -36,7 +36,7 @@ Electron
 |   |   ├── api/ - API implementation for renderer process modules.
 |   |   ├── extension/ - Code related to use of Chrome Extensions
 |   |   |                in Electron's renderer process.
-|   |   ├── remote/ - Logic that handes use of the remote module in
+|   |   ├── remote/ - Logic that handles use of the remote module in
 |   |   |             the main process.
 |   |   └── web-view/ - Logic that handles the use of webviews in the
 |   |                   renderer process.
@@ -72,24 +72,21 @@ Electron
 |       |         message loop into Chromium's message loop.
 |       └── api/ - The implementation of common APIs, and foundations of
 |                  Electron's built-in modules.
-├── spec/ - Components of Electron's test suite run in the renderer process.
-├── spec-main/ - Components of Electron's test suite run in the main process.
+├── spec/ - Components of Electron's test suite run in the main process.
 └── BUILD.gn - Building rules of Electron.
 ```
 
 ## Structure of Other Directories
 
-* **.circleci** - Config file for CI with CircleCI.
-* **.github** - GitHub-specific config files including issues templates and CODEOWNERS.
+* **.github** - GitHub-specific config files including issues templates, CI with GitHub Actions and CODEOWNERS.
 * **dist** - Temporary directory created by `script/create-dist.py` script
   when creating a distribution.
-* **external_binaries** - Downloaded binaries of third-party frameworks which
-  do not support building with `gn`.
 * **node_modules** - Third party node modules used for building.
 * **npm** - Logic for installation of Electron via npm.
 * **out** - Temporary output directory of `ninja`.
 * **script** - Scripts used for development purpose like building, packaging,
   testing, etc.
+
 ```diff
 script/ - The set of all scripts Electron runs for a variety of purposes.
 ├── codesign/ - Fakes codesigning for Electron apps; used for testing.
@@ -98,36 +95,5 @@ script/ - The set of all scripts Electron runs for a variety of purposes.
     ├── notes/ - Generates release notes for new Electron versions.
     └── uploaders/ - Uploads various release-related files during release.
 ```
-* **tools** - Helper scripts used by GN files.
-  * Scripts put here should never be invoked by users directly, unlike those in `script`.
+
 * **typings** - TypeScript typings for Electron's internal code.
-* **vendor** - Source code for some third party dependencies, including `boto` and `requests`.
-
-## Keeping Git Submodules Up to Date
-
-The Electron repository has a few vendored dependencies, found in the
-[/vendor][vendor] directory. Occasionally you might see a message like this
-when running `git status`:
-
-```sh
-$ git status
-
-	modified:   vendor/depot_tools (new commits)
-	modified:   vendor/boto (new commits)
-```
-
-To update these vendored dependencies, run the following command:
-
-```sh
-git submodule update --init --recursive
-```
-
-If you find yourself running this command often, you can create an alias for it
-in your `~/.gitconfig` file:
-
-```sh
-[alias]
-	su = submodule update --init --recursive
-```
-
-[vendor]: https://github.com/electron/electron/tree/master/vendor

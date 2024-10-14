@@ -10,10 +10,10 @@ them should they exist.
 This will be upstreamed.
 
 diff --git a/printing/printing_context_mac.h b/printing/printing_context_mac.h
-index 06cdc0e1a4a50e29a148c97c964c30a939e800da..5db5cdb61be0beee4506313dcde46c499e011383 100644
+index 5b469b3b6bd11d8e0baa08e9be257990ac9bc438..c1410e5d8112f0319de40e4fbf41dbaea4b9733c 100644
 --- a/printing/printing_context_mac.h
 +++ b/printing/printing_context_mac.h
-@@ -81,6 +81,10 @@ class PRINTING_EXPORT PrintingContextMac : public PrintingContext {
+@@ -84,6 +84,10 @@ class COMPONENT_EXPORT(PRINTING) PrintingContextMac : public PrintingContext {
    // Returns true if the orientation was set.
    bool SetOrientationIsLandscape(bool landscape);
  
@@ -25,30 +25,30 @@ index 06cdc0e1a4a50e29a148c97c964c30a939e800da..5db5cdb61be0beee4506313dcde46c49
    // Returns true if duplex mode is set.
    bool SetDuplexModeInPrintSettings(mojom::DuplexMode mode);
 diff --git a/printing/printing_context_mac.mm b/printing/printing_context_mac.mm
-index 56bcfbe625537c7b1bc2a999c261836bb15896ba..f916e78de99b87e0dae4f5f87329886b658ccd93 100644
+index f39f8b2dd3aa2b89498ed5331aa9b9ba6a02abf5..c0e155c14b2b4e81cde35cea1db284bc4c43f5e6 100644
 --- a/printing/printing_context_mac.mm
 +++ b/printing/printing_context_mac.mm
-@@ -188,7 +188,8 @@ PMPaper MatchPaper(CFArrayRef paper_list,
-         !SetCopiesInPrintSettings(settings_->copies()) ||
+@@ -520,7 +520,8 @@ bool IsIppColorModelColorful(mojom::ColorModel color_model) {
          !SetCollateInPrintSettings(settings_->collate()) ||
          !SetDuplexModeInPrintSettings(settings_->duplex_mode()) ||
--        !SetOutputColor(settings_->color())) {
-+        !SetOutputColor(settings_->color()) ||
+         !SetOutputColor(static_cast<int>(settings_->color())) ||
+-        !SetResolution(settings_->dpi_size())) {
++        !SetResolution(settings_->dpi_size()) ||
 +        !SetPrintRangeInPrintSettings(settings_->ranges()) ) {
        return OnError();
      }
    }
-@@ -341,6 +342,22 @@ PMPaper MatchPaper(CFArrayRef paper_list,
+@@ -673,6 +674,22 @@ bool IsIppColorModelColorful(mojom::ColorModel color_model) {
    return PMSetCopies(print_settings, copies, false) == noErr;
  }
  
 +bool PrintingContextMac::SetPrintRangeInPrintSettings(const PageRanges& ranges) {
 +  // Default is already NSPrintAllPages - we can safely bail.
 +  if (ranges.empty())
-+    return true; 
++    return true;
 +
-+  auto* print_settings =
-+      static_cast<PMPrintSettings>([print_info_.get() PMPrintSettings]);
++  PMPrintSettings print_settings =
++      static_cast<PMPrintSettings>([print_info_ PMPrintSettings]);
 +
 +  // macOS does not allow multiple ranges, so pluck the first.
 +  auto range = ranges.front();
@@ -60,12 +60,12 @@ index 56bcfbe625537c7b1bc2a999c261836bb15896ba..f916e78de99b87e0dae4f5f87329886b
 +
  bool PrintingContextMac::SetCollateInPrintSettings(bool collate) {
    PMPrintSettings print_settings =
-       static_cast<PMPrintSettings>([print_info_.get() PMPrintSettings]);
+       static_cast<PMPrintSettings>([print_info_ PMPrintSettings]);
 diff --git a/printing/printing_context_system_dialog_win.cc b/printing/printing_context_system_dialog_win.cc
-index d3c8677f30d72efc49b28f293260c74c7b8d8b4e..f6e66aaa58ab1881d64dcbb320ae8b5ac7631b28 100644
+index c6a080107949c435565d6e57646f36fd5e3b912d..e37331436cf5d4bca41bb39a288d395e820736fd 100644
 --- a/printing/printing_context_system_dialog_win.cc
 +++ b/printing/printing_context_system_dialog_win.cc
-@@ -52,14 +52,28 @@ void PrintingContextSystemDialogWin::AskUserForSettings(
+@@ -77,14 +77,28 @@ void PrintingContextSystemDialogWin::AskUserForSettings(
    PRINTPAGERANGE ranges[32];
    dialog_options.nStartPage = START_PAGE_GENERAL;
    if (max_pages) {
@@ -74,7 +74,7 @@ index d3c8677f30d72efc49b28f293260c74c7b8d8b4e..f6e66aaa58ab1881d64dcbb320ae8b5a
 -    ranges[0].nFromPage = 1;
 -    ranges[0].nToPage = max_pages;
 -    dialog_options.nPageRanges = 1;
--    dialog_options.nMaxPageRanges = base::size(ranges);
+-    dialog_options.nMaxPageRanges = std::size(ranges);
 +
 +    auto page_ranges = settings_->ranges();
 +    if (!page_ranges.empty()) {
@@ -95,19 +95,19 @@ index d3c8677f30d72efc49b28f293260c74c7b8d8b4e..f6e66aaa58ab1881d64dcbb320ae8b5a
 +
      dialog_options.nMinPage = 1;
      dialog_options.nMaxPage = max_pages;
-+    dialog_options.nMaxPageRanges = base::size(ranges);
++    dialog_options.nMaxPageRanges = std::size(ranges);
      dialog_options.lpPageRanges = ranges;
    } else {
      // No need to bother, we don't know how many pages are available.
 diff --git a/ui/gtk/printing/print_dialog_gtk.cc b/ui/gtk/printing/print_dialog_gtk.cc
-index 8a78a609295a1d90208bdc7e73d7a850c319f361..2f5bc01bedf84126d8fb1597a0b813a2b7230279 100644
+index 1a2c8f974e3d38478b6fdea41ec3c7e668e141db..0e560956b03855647f8e90bee585200764db4b46 100644
 --- a/ui/gtk/printing/print_dialog_gtk.cc
 +++ b/ui/gtk/printing/print_dialog_gtk.cc
-@@ -239,6 +239,23 @@ void PrintDialogGtk::UpdateSettings(
+@@ -247,6 +247,24 @@ void PrintDialogGtk::UpdateSettings(
  
    gtk_print_settings_set_n_copies(gtk_settings_, settings->copies());
    gtk_print_settings_set_collate(gtk_settings_, settings->collate());
-+  
++
 +  auto print_ranges = settings->ranges();
 +  if (!print_ranges.empty()) {
 +    // Tell the system that we only intend to print a subset of pages.
@@ -124,6 +124,7 @@ index 8a78a609295a1d90208bdc7e73d7a850c319f361..2f5bc01bedf84126d8fb1597a0b813a2
 +    gtk_print_settings_set_page_ranges(gtk_settings_, ranges, 1);
 +    g_free(ranges);
 +  }
- 
- #if defined(USE_CUPS)
-   // Set advanced settings first so they can be overridden by user applied
++
+   if (settings->dpi_horizontal() > 0 && settings->dpi_vertical() > 0) {
+     gtk_print_settings_set_resolution_xy(
+         gtk_settings_, settings->dpi_horizontal(), settings->dpi_vertical());

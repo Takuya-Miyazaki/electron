@@ -1,10 +1,12 @@
-import { BaseWindow, MenuItem, webContents, Menu as MenuType, BrowserWindow, MenuItemConstructorOptions } from 'electron/main';
 import { sortMenuItems } from '@electron/internal/browser/api/menu-utils';
+import { setApplicationMenuWasSet } from '@electron/internal/browser/default-menu';
 
-const v8Util = process._linkedBinding('electron_common_v8_util');
+import { BaseWindow, MenuItem, webContents, Menu as MenuType, MenuItemConstructorOptions } from 'electron/main';
+
 const bindings = process._linkedBinding('electron_browser_menu');
 
 const { Menu } = bindings as { Menu: typeof MenuType };
+const checked = new WeakMap<MenuItem, boolean>();
 let applicationMenu: MenuType | null = null;
 let groupIdIndex = 0;
 
@@ -17,7 +19,9 @@ Menu.prototype._init = function () {
 };
 
 Menu.prototype._isCommandIdChecked = function (id) {
-  return this.commandsMap[id] ? this.commandsMap[id].checked : false;
+  const item = this.commandsMap[id];
+  if (!item) return false;
+  return item.getCheckStatus();
 };
 
 Menu.prototype._isCommandIdEnabled = function (id) {
@@ -41,18 +45,24 @@ Menu.prototype._shouldRegisterAcceleratorForCommandId = function (id) {
   return this.commandsMap[id] ? this.commandsMap[id].registerAccelerator : false;
 };
 
+if (process.platform === 'darwin') {
+  Menu.prototype._getSharingItemForCommandId = function (id) {
+    return this.commandsMap[id] ? this.commandsMap[id].sharingItem : null;
+  };
+}
+
 Menu.prototype._executeCommand = function (event, id) {
   const command = this.commandsMap[id];
   if (!command) return;
   const focusedWindow = BaseWindow.getFocusedWindow();
-  command.click(event, focusedWindow instanceof BrowserWindow ? focusedWindow : undefined, webContents.getFocusedWebContents());
+  command.click(event, focusedWindow, webContents.getFocusedWebContents());
 };
 
 Menu.prototype._menuWillShow = function () {
   // Ensure radio groups have at least one menu item selected
   for (const id of Object.keys(this.groupsMap)) {
     const found = this.groupsMap[id].find(item => item.checked) || null;
-    if (!found) v8Util.setHiddenValue(this.groupsMap[id][0], 'checked', true);
+    if (!found) checked.set(this.groupsMap[id][0], true);
   }
 };
 
@@ -60,7 +70,7 @@ Menu.prototype.popup = function (options = {}) {
   if (options == null || typeof options !== 'object') {
     throw new TypeError('Options must be an object');
   }
-  let { window, x, y, positioningItem, callback } = options;
+  let { window, x, y, positioningItem, sourceType, callback } = options;
 
   // no callback passed
   if (!callback || typeof callback !== 'function') callback = () => {};
@@ -69,10 +79,11 @@ Menu.prototype.popup = function (options = {}) {
   if (typeof x !== 'number') x = -1;
   if (typeof y !== 'number') y = -1;
   if (typeof positioningItem !== 'number') positioningItem = -1;
+  if (typeof sourceType !== 'string' || !sourceType) sourceType = 'mouse';
 
   // find which window to use
   const wins = BaseWindow.getAllWindows();
-  if (!wins || wins.indexOf(window as any) === -1) {
+  if (!wins || !wins.includes(window as any)) {
     window = BaseWindow.getFocusedWindow() as any;
     if (!window && wins && wins.length > 0) {
       window = wins[0] as any;
@@ -82,7 +93,7 @@ Menu.prototype.popup = function (options = {}) {
     }
   }
 
-  this.popupAt(window as unknown as BaseWindow, x, y, positioningItem, callback);
+  this.popupAt(window as unknown as BaseWindow, x, y, positioningItem, sourceType, callback);
   return { browserWindow: window, x, y, position: positioningItem };
 };
 
@@ -133,7 +144,7 @@ Menu.prototype.insert = function (pos, item) {
   if (item.icon) this.setIcon(pos, item.icon);
   if (item.role) this.setRole(pos, item.role);
 
-  // Make menu accessable to items.
+  // Make menu accessible to items.
   item.overrideReadOnlyProperty('menu', this);
 
   // Remember the items.
@@ -143,9 +154,9 @@ Menu.prototype.insert = function (pos, item) {
 
 Menu.prototype._callMenuWillShow = function () {
   if (this.delegate) this.delegate.menuWillShow(this);
-  this.items.forEach(item => {
+  for (const item of this.items) {
     if (item.submenu) item.submenu._callMenuWillShow();
-  });
+  }
 };
 
 /* Static Methods */
@@ -161,7 +172,7 @@ Menu.setApplicationMenu = function (menu: MenuType) {
   }
 
   applicationMenu = menu;
-  v8Util.setHiddenValue(global, 'applicationMenuSet', true);
+  setApplicationMenuWasSet();
 
   if (process.platform === 'darwin') {
     if (!menu) return;
@@ -169,7 +180,7 @@ Menu.setApplicationMenu = function (menu: MenuType) {
     bindings.setApplicationMenu(menu);
   } else {
     const windows = BaseWindow.getAllWindows();
-    return windows.map(w => w.setMenu(menu));
+    windows.map(w => w.setMenu(menu));
   }
 };
 
@@ -182,17 +193,17 @@ Menu.buildFromTemplate = function (template) {
     throw new TypeError('Invalid template for MenuItem: must have at least one of label, role or type');
   }
 
-  const filtered = removeExtraSeparators(template);
-  const sorted = sortTemplate(filtered);
+  const sorted = sortTemplate(template);
+  const filtered = removeExtraSeparators(sorted);
 
   const menu = new Menu();
-  sorted.forEach(item => {
+  for (const item of filtered) {
     if (item instanceof MenuItem) {
       menu.append(item);
     } else {
       menu.append(new MenuItem(item));
     }
-  });
+  }
 
   return menu;
 };
@@ -204,9 +215,7 @@ function areValidTemplateItems (template: (MenuItemConstructorOptions | MenuItem
   return template.every(item =>
     item != null &&
     typeof item === 'object' &&
-    (Object.prototype.hasOwnProperty.call(item, 'label') ||
-     Object.prototype.hasOwnProperty.call(item, 'role') ||
-     item.type === 'separator'));
+    (Object.hasOwn(item, 'label') || Object.hasOwn(item, 'role') || item.type === 'separator'));
 }
 
 function sortTemplate (template: (MenuItemConstructorOptions | MenuItem)[]) {
@@ -223,12 +232,12 @@ function sortTemplate (template: (MenuItemConstructorOptions | MenuItem)[]) {
 function generateGroupId (items: (MenuItemConstructorOptions | MenuItem)[], pos: number) {
   if (pos > 0) {
     for (let idx = pos - 1; idx >= 0; idx--) {
-      if (items[idx].type === 'radio') return (items[idx] as any).groupId;
+      if (items[idx].type === 'radio') return (items[idx] as MenuItem).groupId;
       if (items[idx].type === 'separator') break;
     }
   } else if (pos < items.length) {
     for (let idx = pos; idx <= items.length - 1; idx++) {
-      if (items[idx].type === 'radio') return (items[idx] as any).groupId;
+      if (items[idx].type === 'radio') return (items[idx] as MenuItem).groupId;
       if (items[idx].type === 'separator') break;
     }
   }
@@ -267,15 +276,15 @@ function insertItemByType (this: MenuType, item: MenuItem, pos: number) {
       this.groupsMap[item.groupId].push(item);
 
       // Setting a radio menu item should flip other items in the group.
-      v8Util.setHiddenValue(item, 'checked', item.checked);
+      checked.set(item, item.checked);
       Object.defineProperty(item, 'checked', {
         enumerable: true,
-        get: () => v8Util.getHiddenValue(item, 'checked'),
+        get: () => checked.get(item),
         set: () => {
-          this.groupsMap[item.groupId].forEach(other => {
-            if (other !== item) v8Util.setHiddenValue(other, 'checked', false);
-          });
-          v8Util.setHiddenValue(item, 'checked', true);
+          for (const other of this.groupsMap[item.groupId]) {
+            if (other !== item) checked.set(other, false);
+          }
+          checked.set(item, true);
         }
       });
       this.insertRadioItem(pos, item.commandId, item.label, item.groupId);

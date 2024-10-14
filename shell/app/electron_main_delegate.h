@@ -2,14 +2,18 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_APP_ELECTRON_MAIN_DELEGATE_H_
-#define SHELL_APP_ELECTRON_MAIN_DELEGATE_H_
+#ifndef ELECTRON_SHELL_APP_ELECTRON_MAIN_DELEGATE_H_
+#define ELECTRON_SHELL_APP_ELECTRON_MAIN_DELEGATE_H_
 
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include "content/public/app/content_main_delegate.h"
-#include "content/public/common/content_client.h"
+
+namespace content {
+class Client;
+}
 
 namespace tracing {
 class TracingSamplerProfiler;
@@ -17,7 +21,7 @@ class TracingSamplerProfiler;
 
 namespace electron {
 
-void LoadResourceBundle(const std::string& locale);
+std::string LoadResourceBundle(const std::string& locale);
 
 class ElectronMainDelegate : public content::ContentMainDelegate {
  public:
@@ -26,27 +30,34 @@ class ElectronMainDelegate : public content::ContentMainDelegate {
   ElectronMainDelegate();
   ~ElectronMainDelegate() override;
 
+  // disable copy
+  ElectronMainDelegate(const ElectronMainDelegate&) = delete;
+  ElectronMainDelegate& operator=(const ElectronMainDelegate&) = delete;
+
  protected:
   // content::ContentMainDelegate:
-  bool BasicStartupComplete(int* exit_code) override;
+  std::string_view GetBrowserV8SnapshotFilename() override;
+  std::optional<int> BasicStartupComplete() override;
   void PreSandboxStartup() override;
-  void PreCreateMainMessageLoop() override;
-  void PostEarlyInitialization(bool is_running_tests) override;
+  void SandboxInitialized(const std::string& process_type) override;
+  std::optional<int> PreBrowserMain() override;
+  content::ContentClient* CreateContentClient() override;
   content::ContentBrowserClient* CreateContentBrowserClient() override;
   content::ContentGpuClient* CreateContentGpuClient() override;
   content::ContentRendererClient* CreateContentRendererClient() override;
   content::ContentUtilityClient* CreateContentUtilityClient() override;
-  int RunProcess(
+  absl::variant<int, content::MainFunctionParams> RunProcess(
       const std::string& process_type,
-      const content::MainFunctionParams& main_function_params) override;
-  bool ShouldCreateFeatureList() override;
+      content::MainFunctionParams main_function_params) override;
+  bool ShouldCreateFeatureList(InvokedIn invoked_in) override;
+  bool ShouldInitializeMojo(InvokedIn invoked_in) override;
   bool ShouldLockSchemeRegistry() override;
-#if defined(OS_LINUX)
+#if BUILDFLAG(IS_LINUX)
   void ZygoteForked() override;
 #endif
 
  private:
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   void OverrideChildProcessPath();
   void OverrideFrameworkBundlePath();
   void SetUpBundleOverrides();
@@ -58,10 +69,8 @@ class ElectronMainDelegate : public content::ContentMainDelegate {
   std::unique_ptr<content::ContentRendererClient> renderer_client_;
   std::unique_ptr<content::ContentUtilityClient> utility_client_;
   std::unique_ptr<tracing::TracingSamplerProfiler> tracing_sampler_profiler_;
-
-  DISALLOW_COPY_AND_ASSIGN(ElectronMainDelegate);
 };
 
 }  // namespace electron
 
-#endif  // SHELL_APP_ELECTRON_MAIN_DELEGATE_H_
+#endif  // ELECTRON_SHELL_APP_ELECTRON_MAIN_DELEGATE_H_

@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_EXTENSIONS_ELECTRON_KIOSK_DELEGATE_H_
-#define SHELL_BROWSER_EXTENSIONS_ELECTRON_KIOSK_DELEGATE_H_
+#ifndef ELECTRON_SHELL_BROWSER_EXTENSIONS_ELECTRON_KIOSK_DELEGATE_H_
+#define ELECTRON_SHELL_BROWSER_EXTENSIONS_ELECTRON_KIOSK_DELEGATE_H_
 
 #include "extensions/browser/kiosk/kiosk_delegate.h"
 #include "extensions/common/extension_id.h"
@@ -17,10 +17,10 @@ class ElectronKioskDelegate : public extensions::KioskDelegate {
   ElectronKioskDelegate();
   ~ElectronKioskDelegate() override;
 
-  // KioskDelegate overrides:
+  // extensions::KioskDelegate
   bool IsAutoLaunchedKioskApp(const extensions::ExtensionId& id) const override;
 };
 
 }  // namespace electron
 
-#endif  // SHELL_BROWSER_EXTENSIONS_ELECTRON_KIOSK_DELEGATE_H_
+#endif  // ELECTRON_SHELL_BROWSER_EXTENSIONS_ELECTRON_KIOSK_DELEGATE_H_

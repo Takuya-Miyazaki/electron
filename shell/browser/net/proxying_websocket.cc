@@ -6,14 +6,13 @@
 
 #include <utility>
 
-#include "base/bind.h"
+#include "base/functional/bind.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
-#include "components/keyed_service/content/browser_context_keyed_service_shutdown_notifier_factory.h"
 #include "content/public/browser/browser_thread.h"
 #include "extensions/browser/extension_navigation_ui_data.h"
 #include "net/base/ip_endpoint.h"
-#include "net/http/http_util.h"
+#include "services/network/public/mojom/url_response_head.mojom.h"
 
 namespace electron {
 
@@ -40,21 +39,20 @@ ProxyingWebSocket::ProxyingWebSocket(
           process_id,
           render_frame_id,
           nullptr,
-          MSG_ROUTING_NONE,
           request,
           /*is_download=*/false,
           /*is_async=*/true,
           /*is_service_worker_script=*/false,
-          /*navigation_id=*/base::nullopt)) {}
+          /*navigation_id=*/std::nullopt)) {}
 
 ProxyingWebSocket::~ProxyingWebSocket() {
   if (on_before_send_headers_callback_) {
     std::move(on_before_send_headers_callback_)
-        .Run(net::ERR_ABORTED, base::nullopt);
+        .Run(net::ERR_ABORTED, std::nullopt);
   }
   if (on_headers_received_callback_) {
     std::move(on_headers_received_callback_)
-        .Run(net::ERR_ABORTED, base::nullopt, GURL());
+        .Run(net::ERR_ABORTED, std::nullopt, GURL());
   }
 }
 
@@ -225,8 +223,8 @@ void ProxyingWebSocket::StartProxying(
     WebRequestAPI* web_request_api,
     WebSocketFactory factory,
     const GURL& url,
-    const GURL& site_for_cookies,
-    const base::Optional<std::string>& user_agent,
+    const net::SiteForCookies& site_for_cookies,
+    const std::optional<std::string>& user_agent,
     mojo::PendingRemote<network::mojom::WebSocketHandshakeClient>
         handshake_client,
     bool has_extra_headers,
@@ -238,7 +236,7 @@ void ProxyingWebSocket::StartProxying(
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   network::ResourceRequest request;
   request.url = url;
-  request.site_for_cookies = net::SiteForCookies::FromUrl(site_for_cookies);
+  request.site_for_cookies = site_for_cookies;
   if (user_agent) {
     request.headers.SetHeader(net::HttpRequestHeaders::kUserAgent, *user_agent);
   }
@@ -355,11 +353,11 @@ void ProxyingWebSocket::OnHeadersReceivedComplete(int error_code) {
   }
 
   if (on_headers_received_callback_) {
-    base::Optional<std::string> headers;
+    std::optional<std::string> headers;
     if (override_headers_)
       headers = override_headers_->raw_headers();
     std::move(on_headers_received_callback_)
-        .Run(net::OK, headers, base::nullopt);
+        .Run(net::OK, headers, std::nullopt);
   }
 
   if (override_headers_) {
@@ -379,17 +377,16 @@ void ProxyingWebSocket::OnAuthRequiredComplete(AuthRequiredResponse rv) {
   CHECK(auth_required_callback_);
   ResumeIncomingMethodCallProcessing();
   switch (rv) {
-    case AuthRequiredResponse::AUTH_REQUIRED_RESPONSE_NO_ACTION:
-    case AuthRequiredResponse::AUTH_REQUIRED_RESPONSE_CANCEL_AUTH:
-      std::move(auth_required_callback_).Run(base::nullopt);
+    case AuthRequiredResponse::kNoAction:
+    case AuthRequiredResponse::kCancelAuth:
+      std::move(auth_required_callback_).Run(std::nullopt);
       break;
 
-    case AuthRequiredResponse::AUTH_REQUIRED_RESPONSE_SET_AUTH:
+    case AuthRequiredResponse::kSetAuth:
       std::move(auth_required_callback_).Run(auth_credentials_);
       break;
-    case AuthRequiredResponse::AUTH_REQUIRED_RESPONSE_IO_PENDING:
+    case AuthRequiredResponse::kIoPending:
       NOTREACHED();
-      break;
   }
 }
 
@@ -405,7 +402,7 @@ void ProxyingWebSocket::OnHeadersReceivedCompleteForAuth(
 
   auto continuation = base::BindRepeating(
       &ProxyingWebSocket::OnAuthRequiredComplete, weak_factory_.GetWeakPtr());
-  auto auth_rv = AuthRequiredResponse::AUTH_REQUIRED_RESPONSE_IO_PENDING;
+  auto auth_rv = AuthRequiredResponse::kIoPending;
   PauseIncomingMethodCallProcessing();
 
   OnAuthRequiredComplete(auth_rv);
@@ -438,7 +435,7 @@ void ProxyingWebSocket::OnError(int error_code) {
 void ProxyingWebSocket::OnMojoConnectionErrorWithCustomReason(
     uint32_t custom_reason,
     const std::string& description) {
-  // Here we want to nofiy the custom reason to the client, which is why
+  // Here we want to notify the custom reason to the client, which is why
   // we reset |forwarding_handshake_client_| manually.
   forwarding_handshake_client_.ResetWithReason(custom_reason, description);
   OnError(net::ERR_FAILED);

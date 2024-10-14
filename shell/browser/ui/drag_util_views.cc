@@ -6,8 +6,8 @@
 
 #include "ui/aura/client/drag_drop_client.h"
 #include "ui/aura/window.h"
+#include "ui/base/clipboard/file_info.h"
 #include "ui/base/dragdrop/drag_drop_types.h"
-#include "ui/base/dragdrop/file_info/file_info.h"
 #include "ui/base/dragdrop/mojom/drag_drop_types.mojom-shared.h"
 #include "ui/base/dragdrop/os_exchange_data.h"
 #include "ui/display/screen.h"
@@ -21,12 +21,15 @@ namespace electron {
 void DragFileItems(const std::vector<base::FilePath>& files,
                    const gfx::Image& icon,
                    gfx::NativeView view) {
-  // Set up our OLE machinery
+  aura::Window* root_window = view->GetRootWindow();
+  if (!root_window || !aura::client::GetDragDropClient(root_window))
+    return;
+
+  // Set up our OLE machinery.
   auto data = std::make_unique<ui::OSExchangeData>();
 
-  button_drag_utils::SetDragImage(
-      GURL(), files[0].LossyDisplayName(), icon.AsImageSkia(), nullptr,
-      *views::Widget::GetTopLevelWidgetForNativeView(view), data.get());
+  button_drag_utils::SetDragImage(GURL(), files[0].LossyDisplayName(),
+                                  icon.AsImageSkia(), nullptr, data.get());
 
   std::vector<ui::FileInfo> file_infos;
   file_infos.reserve(files.size());
@@ -34,10 +37,6 @@ void DragFileItems(const std::vector<base::FilePath>& files,
     file_infos.emplace_back(file, base::FilePath());
   }
   data->SetFilenames(file_infos);
-
-  aura::Window* root_window = view->GetRootWindow();
-  if (!root_window || !aura::client::GetDragDropClient(root_window))
-    return;
 
   gfx::Point location = display::Screen::GetScreen()->GetCursorScreenPoint();
   // TODO(varunjain): Properly determine and send DragEventSource below.

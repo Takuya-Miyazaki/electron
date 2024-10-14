@@ -2,10 +2,9 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_RENDERER_CONTENT_SETTINGS_OBSERVER_H_
-#define SHELL_RENDERER_CONTENT_SETTINGS_OBSERVER_H_
+#ifndef ELECTRON_SHELL_RENDERER_CONTENT_SETTINGS_OBSERVER_H_
+#define ELECTRON_SHELL_RENDERER_CONTENT_SETTINGS_OBSERVER_H_
 
-#include "base/compiler_specific.h"
 #include "content/public/renderer/render_frame_observer.h"
 #include "third_party/blink/public/platform/web_content_settings_client.h"
 
@@ -17,18 +16,18 @@ class ContentSettingsObserver : public content::RenderFrameObserver,
   explicit ContentSettingsObserver(content::RenderFrame* render_frame);
   ~ContentSettingsObserver() override;
 
+  // disable copy
+  ContentSettingsObserver(const ContentSettingsObserver&) = delete;
+  ContentSettingsObserver& operator=(const ContentSettingsObserver&) = delete;
+
   // blink::WebContentSettingsClient implementation.
-  bool AllowDatabase() override;
-  bool AllowStorage(bool local) override;
-  bool AllowIndexedDB() override;
+  bool AllowStorageAccessSync(StorageType storage_type) override;
 
  private:
   // content::RenderFrameObserver implementation.
   void OnDestruct() override;
-
-  DISALLOW_COPY_AND_ASSIGN(ContentSettingsObserver);
 };
 
 }  // namespace electron
 
-#endif  // SHELL_RENDERER_CONTENT_SETTINGS_OBSERVER_H_
+#endif  // ELECTRON_SHELL_RENDERER_CONTENT_SETTINGS_OBSERVER_H_

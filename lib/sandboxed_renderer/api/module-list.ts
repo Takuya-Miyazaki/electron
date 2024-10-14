@@ -13,30 +13,14 @@ export const moduleList: ElectronInternal.ModuleEntry[] = [
   },
   {
     name: 'nativeImage',
-    loader: () => require('@electron/internal/renderer/api/native-image')
+    loader: () => require('@electron/internal/common/api/native-image')
   },
   {
     name: 'webFrame',
     loader: () => require('@electron/internal/renderer/api/web-frame')
   },
-  // The internal modules, invisible unless you know their names.
   {
-    name: 'deprecate',
-    loader: () => require('@electron/internal/common/api/deprecate'),
-    private: true
+    name: 'webUtils',
+    loader: () => require('@electron/internal/renderer/api/web-utils')
   }
 ];
-
-if (BUILDFLAG(ENABLE_DESKTOP_CAPTURER)) {
-  moduleList.push({
-    name: 'desktopCapturer',
-    loader: () => require('@electron/internal/renderer/api/desktop-capturer')
-  });
-}
-
-if (BUILDFLAG(ENABLE_REMOTE_MODULE) && process.isRemoteModuleEnabled) {
-  moduleList.push({
-    name: 'remote',
-    loader: () => require('@electron/internal/renderer/api/remote')
-  });
-}

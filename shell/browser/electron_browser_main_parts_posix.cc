@@ -4,6 +4,7 @@
 
 // Most code came from: chrome/browser/chrome_browser_main_posix.cc.
 
+#include "base/notreached.h"
 #include "shell/browser/electron_browser_main_parts.h"
 
 #include <errno.h>
@@ -13,17 +14,28 @@
 #include <sys/resource.h>
 #include <unistd.h>
 
+#include "base/compiler_specific.h"
+#include "base/debug/leak_annotations.h"
 #include "base/posix/eintr_wrapper.h"
-#include "base/task/post_task.h"
+#include "base/threading/platform_thread.h"
 #include "content/public/browser/browser_task_traits.h"
-#include "content/public/browser/browser_thread.h"
 #include "shell/browser/browser.h"
-
-using content::BrowserThread;
 
 namespace electron {
 
 namespace {
+
+// write |ref|'s raw bytes to |fd|.
+template <typename T>
+void WriteValToFd(int fd, const T& ref) {
+  base::span<const uint8_t> bytes = base::byte_span_from_ref(ref);
+  while (!bytes.empty()) {
+    const ssize_t rv = HANDLE_EINTR(write(fd, bytes.data(), bytes.size()));
+    RAW_CHECK(rv >= 0);
+    const size_t n_bytes_written = rv >= 0 ? static_cast<size_t>(rv) : 0U;
+    bytes = bytes.subspan(n_bytes_written);
+  }
+}
 
 // See comment in |PreEarlyInitialization()|, where sigaction is called.
 void SIGCHLDHandler(int signal) {}
@@ -49,30 +61,22 @@ void GracefulShutdownHandler(int signal) {
   RAW_CHECK(g_pipe_pid == getpid());
   RAW_CHECK(g_shutdown_pipe_write_fd != -1);
   RAW_CHECK(g_shutdown_pipe_read_fd != -1);
-  size_t bytes_written = 0;
-  do {
-    int rv = HANDLE_EINTR(
-        write(g_shutdown_pipe_write_fd,
-              reinterpret_cast<const char*>(&signal) + bytes_written,
-              sizeof(signal) - bytes_written));
-    RAW_CHECK(rv >= 0);
-    bytes_written += rv;
-  } while (bytes_written < sizeof(signal));
+  WriteValToFd(g_shutdown_pipe_write_fd, signal);
 }
 
-// See comment in |PostMainMessageLoopStart()|, where sigaction is called.
+// See comment in |PostCreateMainMessageLoop()|, where sigaction is called.
 void SIGHUPHandler(int signal) {
   RAW_CHECK(signal == SIGHUP);
   GracefulShutdownHandler(signal);
 }
 
-// See comment in |PostMainMessageLoopStart()|, where sigaction is called.
+// See comment in |PostCreateMainMessageLoop()|, where sigaction is called.
 void SIGINTHandler(int signal) {
   RAW_CHECK(signal == SIGINT);
   GracefulShutdownHandler(signal);
 }
 
-// See comment in |PostMainMessageLoopStart()|, where sigaction is called.
+// See comment in |PostCreateMainMessageLoop()|, where sigaction is called.
 void SIGTERMHandler(int signal) {
   RAW_CHECK(signal == SIGTERM);
   GracefulShutdownHandler(signal);
@@ -80,19 +84,34 @@ void SIGTERMHandler(int signal) {
 
 class ShutdownDetector : public base::PlatformThread::Delegate {
  public:
-  explicit ShutdownDetector(int shutdown_fd);
+  explicit ShutdownDetector(
+      int shutdown_fd,
+      base::OnceCallback<void()> shutdown_callback,
+      const scoped_refptr<base::SingleThreadTaskRunner>& task_runner);
 
+  // disable copy
+  ShutdownDetector(const ShutdownDetector&) = delete;
+  ShutdownDetector& operator=(const ShutdownDetector&) = delete;
+
+  // base::PlatformThread::Delegate:
   void ThreadMain() override;
 
  private:
   const int shutdown_fd_;
-
-  DISALLOW_COPY_AND_ASSIGN(ShutdownDetector);
+  base::OnceCallback<void()> shutdown_callback_;
+  const scoped_refptr<base::SingleThreadTaskRunner> task_runner_;
 };
 
-ShutdownDetector::ShutdownDetector(int shutdown_fd)
-    : shutdown_fd_(shutdown_fd) {
+ShutdownDetector::ShutdownDetector(
+    int shutdown_fd,
+    base::OnceCallback<void()> shutdown_callback,
+    const scoped_refptr<base::SingleThreadTaskRunner>& task_runner)
+    : shutdown_fd_(shutdown_fd),
+      shutdown_callback_(std::move(shutdown_callback)),
+      task_runner_(task_runner) {
   CHECK_NE(shutdown_fd_, -1);
+  CHECK(!shutdown_callback_.is_null());
+  CHECK(task_runner_);
 }
 
 // These functions are used to help us diagnose crash dumps that happen
@@ -115,35 +134,41 @@ NOINLINE void ExitPosted() {
   sleep(UINT_MAX);
 }
 
+// read |sizeof(T)| raw bytes from |fd| and return the result
+template <typename T>
+[[nodiscard]] std::optional<T> ReadValFromFd(int fd) {
+  auto val = T{};
+  base::span<uint8_t> bytes = base::byte_span_from_ref(val);
+  while (!bytes.empty()) {
+    const ssize_t rv = HANDLE_EINTR(read(fd, bytes.data(), bytes.size()));
+    if (rv < 0) {
+      NOTREACHED_IN_MIGRATION() << "Unexpected error: " << strerror(errno);
+      ShutdownFDReadError();
+      return {};
+    }
+    if (rv == 0) {
+      NOTREACHED_IN_MIGRATION() << "Unexpected closure of shutdown pipe.";
+      ShutdownFDClosedError();
+      return {};
+    }
+    const size_t n_bytes_read = static_cast<size_t>(rv);
+    bytes = bytes.subspan(n_bytes_read);
+  }
+  return val;
+}
+
 void ShutdownDetector::ThreadMain() {
   base::PlatformThread::SetName("CrShutdownDetector");
 
-  int signal;
-  size_t bytes_read = 0;
-  do {
-    ssize_t ret = HANDLE_EINTR(
-        read(shutdown_fd_, reinterpret_cast<char*>(&signal) + bytes_read,
-             sizeof(signal) - bytes_read));
-    if (ret < 0) {
-      NOTREACHED() << "Unexpected error: " << strerror(errno);
-      ShutdownFDReadError();
-      break;
-    } else if (ret == 0) {
-      NOTREACHED() << "Unexpected closure of shutdown pipe.";
-      ShutdownFDClosedError();
-      break;
-    }
-    bytes_read += ret;
-  } while (bytes_read < sizeof(signal));
+  const int signal = ReadValFromFd<int>(shutdown_fd_).value_or(0);
   VLOG(1) << "Handling shutdown for signal " << signal << ".";
 
-  if (!base::PostTask(
-          FROM_HERE, {BrowserThread::UI},
-          base::BindOnce(&Browser::Quit, base::Unretained(Browser::Get())))) {
-    // Without a UI thread to post the exit task to, there aren't many
-    // options.  Raise the signal again.  The default handler will pick it up
+  if (!task_runner_->PostTask(FROM_HERE,
+                              base::BindOnce(std::move(shutdown_callback_)))) {
+    // Without a valid task runner to post the exit task to, there aren't many
+    // options. Raise the signal again. The default handler will pick it up
     // and cause an ungraceful exit.
-    RAW_LOG(WARNING, "No UI thread, exiting ungracefully.");
+    RAW_LOG(WARNING, "No valid task runner, exiting ungracefully.");
     kill(getpid(), signal);
 
     // The signal may be handled on another thread.  Give that a chance to
@@ -173,30 +198,33 @@ void ElectronBrowserMainParts::HandleSIGCHLD() {
   CHECK_EQ(sigaction(SIGCHLD, &action, nullptr), 0);
 }
 
-void ElectronBrowserMainParts::HandleShutdownSignals() {
+void ElectronBrowserMainParts::InstallShutdownSignalHandlers(
+    base::OnceCallback<void()> shutdown_callback,
+    const scoped_refptr<base::SingleThreadTaskRunner>& task_runner) {
   int pipefd[2];
   int ret = pipe(pipefd);
   if (ret < 0) {
     PLOG(DFATAL) << "Failed to create pipe";
-  } else {
-    g_pipe_pid = getpid();
-    g_shutdown_pipe_read_fd = pipefd[0];
-    g_shutdown_pipe_write_fd = pipefd[1];
-#if !defined(ADDRESS_SANITIZER) && !defined(KEEP_SHADOW_STACKS)
-    const size_t kShutdownDetectorThreadStackSize = PTHREAD_STACK_MIN * 2;
+    return;
+  }
+  g_pipe_pid = getpid();
+  g_shutdown_pipe_read_fd = pipefd[0];
+  g_shutdown_pipe_write_fd = pipefd[1];
+#if !defined(ADDRESS_SANITIZER)
+  const size_t kShutdownDetectorThreadStackSize = PTHREAD_STACK_MIN * 2;
 #else
-    // ASan instrumentation and -finstrument-functions (used for keeping the
-    // shadow stacks) bloat the stack frames, so we need to increase the stack
-    // size to avoid hitting the guard page.
-    const size_t kShutdownDetectorThreadStackSize = PTHREAD_STACK_MIN * 4;
+  // ASan instrumentation bloats the stack frames, so we need to increase the
+  // stack size to avoid hitting the guard page.
+  const size_t kShutdownDetectorThreadStackSize = PTHREAD_STACK_MIN * 4;
 #endif
-    // TODO(viettrungluu,willchan): crbug.com/29675 - This currently leaks, so
-    // if you change this, you'll probably need to change the suppression.
-    if (!base::PlatformThread::CreateNonJoinable(
-            kShutdownDetectorThreadStackSize,
-            new ShutdownDetector(g_shutdown_pipe_read_fd))) {
-      LOG(DFATAL) << "Failed to create shutdown detector task.";
-    }
+  ShutdownDetector* detector = new ShutdownDetector(
+      g_shutdown_pipe_read_fd, std::move(shutdown_callback), task_runner);
+
+  // PlatformThread does not delete its delegate.
+  ANNOTATE_LEAKING_OBJECT_PTR(detector);
+  if (!base::PlatformThread::CreateNonJoinable(kShutdownDetectorThreadStackSize,
+                                               detector)) {
+    LOG(DFATAL) << "Failed to create shutdown detector task.";
   }
   // Setup signal handlers for shutdown AFTER shutdown pipe is setup because
   // it may be called right away after handler is set.
@@ -205,16 +233,18 @@ void ElectronBrowserMainParts::HandleShutdownSignals() {
   // needs to be reset in child processes. See
   // base/process_util_posix.cc:LaunchProcess.
 
-  // We need to handle SIGTERM, because that is how many POSIX-based distros ask
-  // processes to quit gracefully at shutdown time.
+  // We need to handle SIGTERM, because that is how many POSIX-based distros
+  // ask processes to quit gracefully at shutdown time.
   struct sigaction action;
   memset(&action, 0, sizeof(action));
   action.sa_handler = SIGTERMHandler;
   CHECK_EQ(sigaction(SIGTERM, &action, nullptr), 0);
+
   // Also handle SIGINT - when the user terminates the browser via Ctrl+C. If
   // the browser process is being debugged, GDB will catch the SIGINT first.
   action.sa_handler = SIGINTHandler;
   CHECK_EQ(sigaction(SIGINT, &action, nullptr), 0);
+
   // And SIGHUP, for when the terminal disappears. On shutdown, many Linux
   // distros send SIGHUP, SIGTERM, and then SIGKILL.
   action.sa_handler = SIGHUPHandler;

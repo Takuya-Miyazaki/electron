@@ -6,7 +6,7 @@ You can use [app.commandLine.appendSwitch][append-switch] to append them in
 your app's main script before the [ready][ready] event of the [app][app] module
 is emitted:
 
-```javascript
+```js
 const { app } = require('electron')
 app.commandLine.appendSwitch('remote-debugging-port', '8315')
 app.commandLine.appendSwitch('host-rules', 'MAP * 127.0.0.1')
@@ -61,23 +61,28 @@ throttling in one window, you can take the hack of
 
 Forces the maximum disk space to be used by the disk cache, in bytes.
 
-### --enable-api-filtering-logging
+### --enable-logging\[=file]
 
-Enables caller stack logging for the following APIs (filtering events):
-- `desktopCapturer.getSources()` / `desktop-capturer-get-sources`
-- `remote.require()` / `remote-require`
-- `remote.getGlobal()` / `remote-get-builtin`
-- `remote.getBuiltin()` / `remote-get-global`
-- `remote.getCurrentWindow()` / `remote-get-current-window`
-- `remote.getCurrentWebContents()` / `remote-get-current-web-contents`
+Prints Chromium's logging to stderr (or a log file).
 
-### --enable-logging
+The `ELECTRON_ENABLE_LOGGING` environment variable has the same effect as
+passing `--enable-logging`.
 
-Prints Chromium's logging into console.
+Passing `--enable-logging` will result in logs being printed on stderr.
+Passing `--enable-logging=file` will result in logs being saved to the file
+specified by `--log-file=...`, or to `electron_debug.log` in the user-data
+directory if `--log-file` is not specified.
 
-This switch can not be used in `app.commandLine.appendSwitch` since it is parsed
-earlier than user's app is loaded, but you can set the `ELECTRON_ENABLE_LOGGING`
-environment variable to achieve the same effect.
+> **Note:** On Windows, logs from child processes cannot be sent to stderr.
+> Logging to a file is the most reliable way to collect logs on Windows.
+
+See also `--log-file`, `--log-level`, `--v`, and `--vmodule`.
+
+### --force-fieldtrials=`trials`
+
+Field trials to be forcefully enabled or disabled.
+
+For example: `WebRTC-Audio-Red-For-Opus/Enabled/`
 
 ### --host-rules=`rules`
 
@@ -111,22 +116,55 @@ Ignore the connections limit for `domains` list separated by `,`.
 
 ### --js-flags=`flags`
 
-Specifies the flags passed to the Node.js engine. It has to be passed when starting
-Electron if you want to enable the `flags` in the main process.
+Specifies the flags passed to the [V8 engine](https://v8.dev). In order to enable the `flags` in the main process,
+this switch must be passed on startup.
 
 ```sh
 $ electron --js-flags="--harmony_proxies --harmony_collections" your-app
 ```
 
-See the [Node.js documentation][node-cli] or run `node --help` in your terminal for a list of available flags. Additionally, run `node --v8-options` to see a list of flags that specifically refer to Node.js's V8 JavaScript engine.
+Run `node --v8-options` or `electron --js-flags="--help"` in your terminal for the list of available flags.  These can be used to enable early-stage JavaScript features, or log and manipulate garbage collection, among other things.
+
+For example, to trace V8 optimization and deoptimization:
+
+```sh
+$ electron --js-flags="--trace-opt --trace-deopt" your-app
+```
 
 ### --lang
 
 Set a custom locale.
 
+### --log-file=`path`
+
+If `--enable-logging` is specified, logs will be written to the given path. The
+parent directory must exist.
+
+Setting the `ELECTRON_LOG_FILE` environment variable is equivalent to passing
+this flag. If both are present, the command-line switch takes precedence.
+
 ### --log-net-log=`path`
 
 Enables net log events to be saved and writes them to `path`.
+
+### --log-level=`N`
+
+Sets the verbosity of logging when used together with `--enable-logging`.
+`N` should be one of [Chrome's LogSeverities][severities].
+
+Note that two complimentary logging mechanisms in Chromium -- `LOG()`
+and `VLOG()` -- are controlled by different switches. `--log-level`
+controls `LOG()` messages, while `--v` and `--vmodule` control `VLOG()`
+messages. So you may want to use a combination of these three switches
+depending on the granularity you want and what logging calls are made
+by the code you're trying to watch.
+
+See [Chromium Logging source][logging] for more information on how
+`LOG()` and `VLOG()` interact. Loosely speaking, `VLOG()` can be thought
+of as sub-levels / per-module levels inside `LOG(INFO)` to control the
+firehose of `LOG(INFO)` data.
+
+See also `--enable-logging`, `--log-level`, `--v`, and `--vmodule`.
 
 ### --no-proxy-server
 
@@ -135,7 +173,8 @@ proxy server flags that are passed.
 
 ### --no-sandbox
 
-Disables Chromium sandbox, which is now enabled by default.
+Disables the Chromium [sandbox](https://www.chromium.org/developers/design-documents/sandbox).
+Forces renderer process and Chromium helper processes to run un-sandboxed.
 Should only be used for testing.
 
 ### --proxy-bypass-list=`hosts`
@@ -146,7 +185,7 @@ list of hosts. This flag has an effect only if used in tandem with
 
 For example:
 
-```javascript
+```js
 const { app } = require('electron')
 app.commandLine.appendSwitch('proxy-bypass-list', '<local>;*.google.com;*foo.com;1.2.3.4:5678')
 ```
@@ -171,20 +210,14 @@ authentication [per Chromium issue](https://bugs.chromium.org/p/chromium/issues/
 
 Enables remote debugging over HTTP on the specified `port`.
 
-### --ppapi-flash-path=`path`
-
-Sets the `path` of the pepper flash plugin.
-
-### --ppapi-flash-version=`version`
-
-Sets the `version` of the pepper flash plugin.
-
 ### --v=`log_level`
 
 Gives the default maximal active V-logging level; 0 is the default. Normally
 positive values are used for V-logging levels.
 
 This switch only works when `--enable-logging` is also passed.
+
+See also `--enable-logging`, `--log-level`, and `--vmodule`.
 
 ### --vmodule=`pattern`
 
@@ -198,25 +231,41 @@ logging level for all code in the source files under a `foo/bar` directory.
 
 This switch only works when `--enable-logging` is also passed.
 
+See also `--enable-logging`, `--log-level`, and `--v`.
+
+### --force_high_performance_gpu
+
+Force using discrete GPU when there are multiple GPUs available.
+
+### --force_low_power_gpu
+
+Force using integrated GPU when there are multiple GPUs available.
+
 ## Node.js Flags
 
 Electron supports some of the [CLI flags][node-cli] supported by Node.js.
 
 **Note:** Passing unsupported command line switches to Electron when it is not running in `ELECTRON_RUN_AS_NODE` will have no effect.
 
-### --inspect-brk[=[host:]port]
+### `--inspect-brk\[=\[host:]port]`
 
 Activate inspector on host:port and break at start of user script. Default host:port is 127.0.0.1:9229.
 
 Aliased to `--debug-brk=[host:]port`.
 
-### --inspect-port=[host:]port
+#### `--inspect-brk-node[=[host:]port]`
+
+Activate inspector on `host:port` and break at start of the first internal
+JavaScript script executed when the inspector is available.
+Default `host:port` is `127.0.0.1:9229`.
+
+### `--inspect-port=\[host:]port`
 
 Set the `host:port` to be used when the inspector is activated. Useful when activating the inspector by sending the SIGUSR1 signal. Default host is `127.0.0.1`.
 
 Aliased to `--debug-port=[host:]port`.
 
-### --inspect[=[host:]port]
+### `--inspect\[=\[host:]port]`
 
 Activate inspector on `host:port`. Default is `127.0.0.1:9229`.
 
@@ -226,14 +275,42 @@ See the [Debugging the Main Process][debugging-main-process] guide for more deta
 
 Aliased to `--debug[=[host:]port`.
 
-### --inspect-publish-uid=stderr,http
+### `--inspect-publish-uid=stderr,http`
+
 Specify ways of the inspector web socket url exposure.
 
-By default inspector websocket url is available in stderr and under /json/list endpoint on http://host:port/json/list.
+By default inspector websocket url is available in stderr and under /json/list endpoint on `http://host:port/json/list`.
+
+### `--no-deprecation`
+
+Silence deprecation warnings.
+
+### `--throw-deprecation`
+
+Throw errors for deprecations.
+
+### `--trace-deprecation`
+
+Print stack traces for deprecations.
+
+### `--trace-warnings`
+
+Print stack traces for process warnings (including deprecations).
+
+### `--dns-result-order=order`
+
+Set the default value of the `verbatim` parameter in the Node.js [`dns.lookup()`](https://nodejs.org/api/dns.html#dnslookuphostname-options-callback) and [`dnsPromises.lookup()`](https://nodejs.org/api/dns.html#dnspromiseslookuphostname-options) functions. The value could be:
+
+* `ipv4first`: sets default `verbatim` `false`.
+* `verbatim`: sets default `verbatim` `true`.
+
+The default is `verbatim` and `dns.setDefaultResultOrder()` have higher priority than `--dns-result-order`.
 
 [app]: app.md
-[append-switch]: app.md#appcommandlineappendswitchswitch-value
-[ready]: app.md#event-ready
-[play-silent-audio]: https://github.com/atom/atom/pull/9485/files
+[append-switch]: command-line.md#commandlineappendswitchswitch-value
 [debugging-main-process]: ../tutorial/debugging-main-process.md
+[logging]: https://source.chromium.org/chromium/chromium/src/+/main:base/logging.h
 [node-cli]: https://nodejs.org/api/cli.html
+[play-silent-audio]: https://github.com/atom/atom/pull/9485/files
+[ready]: app.md#event-ready
+[severities]: https://source.chromium.org/chromium/chromium/src/+/main:base/logging.h?q=logging::LogSeverity&ss=chromium

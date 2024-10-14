@@ -2,15 +2,14 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_UI_VIEWS_GLOBAL_MENU_BAR_X11_H_
-#define SHELL_BROWSER_UI_VIEWS_GLOBAL_MENU_BAR_X11_H_
+#ifndef ELECTRON_SHELL_BROWSER_UI_VIEWS_GLOBAL_MENU_BAR_X11_H_
+#define ELECTRON_SHELL_BROWSER_UI_VIEWS_GLOBAL_MENU_BAR_X11_H_
 
 #include <string>
 
-#include "base/compiler_specific.h"
-#include "base/macros.h"
+#include "base/memory/raw_ptr.h"
 #include "shell/browser/ui/electron_menu_model.h"
-#include "ui/base/glib/glib_signal.h"
+#include "ui/base/glib/scoped_gsignal.h"
 #include "ui/gfx/native_widget_types.h"
 #include "ui/gfx/x/xproto.h"
 
@@ -41,6 +40,10 @@ class GlobalMenuBarX11 {
   explicit GlobalMenuBarX11(NativeWindowViews* window);
   virtual ~GlobalMenuBarX11();
 
+  // disable copy
+  GlobalMenuBarX11(const GlobalMenuBarX11&) = delete;
+  GlobalMenuBarX11& operator=(const GlobalMenuBarX11&) = delete;
+
   // Creates the object path for DbusmenuServer which is attached to |window|.
   static std::string GetPathForWindow(x11::Window window);
 
@@ -62,21 +65,16 @@ class GlobalMenuBarX11 {
   void RegisterAccelerator(DbusmenuMenuitem* item,
                            const ui::Accelerator& accelerator);
 
-  CHROMEG_CALLBACK_1(GlobalMenuBarX11,
-                     void,
-                     OnItemActivated,
-                     DbusmenuMenuitem*,
-                     unsigned int);
-  CHROMEG_CALLBACK_0(GlobalMenuBarX11, void, OnSubMenuShow, DbusmenuMenuitem*);
+  void OnItemActivated(DbusmenuMenuitem* item, unsigned int timestamp);
+  void OnSubMenuShow(DbusmenuMenuitem* item);
 
-  NativeWindowViews* window_;
+  raw_ptr<NativeWindowViews> window_;
   x11::Window xwindow_;
 
-  DbusmenuServer* server_ = nullptr;
-
-  DISALLOW_COPY_AND_ASSIGN(GlobalMenuBarX11);
+  raw_ptr<DbusmenuServer> server_ = nullptr;
+  std::vector<ScopedGSignal> signals_;
 };
 
 }  // namespace electron
 
-#endif  // SHELL_BROWSER_UI_VIEWS_GLOBAL_MENU_BAR_X11_H_
+#endif  // ELECTRON_SHELL_BROWSER_UI_VIEWS_GLOBAL_MENU_BAR_X11_H_

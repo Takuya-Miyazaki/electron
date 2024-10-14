@@ -2,14 +2,15 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_NET_RESOLVE_PROXY_HELPER_H_
-#define SHELL_BROWSER_NET_RESOLVE_PROXY_HELPER_H_
+#ifndef ELECTRON_SHELL_BROWSER_NET_RESOLVE_PROXY_HELPER_H_
+#define ELECTRON_SHELL_BROWSER_NET_RESOLVE_PROXY_HELPER_H_
 
 #include <deque>
+#include <optional>
 #include <string>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
-#include "base/optional.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "services/network/public/mojom/proxy_lookup_client.mojom.h"
 #include "url/gurl.h"
@@ -28,6 +29,10 @@ class ResolveProxyHelper
 
   void ResolveProxy(const GURL& url, ResolveProxyCallback callback);
 
+  // disable copy
+  ResolveProxyHelper(const ResolveProxyHelper&) = delete;
+  ResolveProxyHelper& operator=(const ResolveProxyHelper&) = delete;
+
  protected:
   ~ResolveProxyHelper() override;
 
@@ -40,13 +45,14 @@ class ResolveProxyHelper
     PendingRequest(PendingRequest&& pending_request) noexcept;
     ~PendingRequest();
 
+    // disable copy
+    PendingRequest(const PendingRequest&) = delete;
+    PendingRequest& operator=(const PendingRequest&) = delete;
+
     PendingRequest& operator=(PendingRequest&& pending_request) noexcept;
 
     GURL url;
     ResolveProxyCallback callback;
-
-   private:
-    DISALLOW_COPY_AND_ASSIGN(PendingRequest);
   };
 
   // Starts the first pending request.
@@ -55,7 +61,7 @@ class ResolveProxyHelper
   // network::mojom::ProxyLookupClient implementation.
   void OnProxyLookupComplete(
       int32_t net_error,
-      const base::Optional<net::ProxyInfo>& proxy_info) override;
+      const std::optional<net::ProxyInfo>& proxy_info) override;
 
   // Self-reference. Owned as long as there's an outstanding proxy lookup.
   scoped_refptr<ResolveProxyHelper> owned_self_;
@@ -65,11 +71,9 @@ class ResolveProxyHelper
   mojo::Receiver<network::mojom::ProxyLookupClient> receiver_{this};
 
   // Weak Ref
-  ElectronBrowserContext* browser_context_;
-
-  DISALLOW_COPY_AND_ASSIGN(ResolveProxyHelper);
+  raw_ptr<ElectronBrowserContext> browser_context_;
 };
 
 }  // namespace electron
 
-#endif  // SHELL_BROWSER_NET_RESOLVE_PROXY_HELPER_H_
+#endif  // ELECTRON_SHELL_BROWSER_NET_RESOLVE_PROXY_HELPER_H_

@@ -1,6 +1,8 @@
-import { app, dialog, BrowserWindow, shell, ipcMain } from 'electron';
-import * as path from 'path';
-import * as url from 'url';
+import { shell } from 'electron/common';
+import { app, dialog, BrowserWindow, ipcMain } from 'electron/main';
+
+import * as path from 'node:path';
+import * as url from 'node:url';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -41,34 +43,34 @@ ipcMain.handle('bootstrap', (event) => {
   return isTrustedSender(event.sender) ? electronPath : null;
 });
 
-async function createWindow () {
+async function createWindow (backgroundColor?: string) {
   await app.whenReady();
 
   const options: Electron.BrowserWindowConstructorOptions = {
     width: 960,
     height: 620,
     autoHideMenuBar: true,
-    backgroundColor: '#2f3241',
+    backgroundColor,
     webPreferences: {
-      preload: path.resolve(__dirname, 'preload.js'),
+      preload: url.fileURLToPath(new URL('preload.js', import.meta.url)),
       contextIsolation: true,
       sandbox: true,
-      enableRemoteModule: false
+      nodeIntegration: false
     },
     useContentSize: true,
     show: false
   };
 
   if (process.platform === 'linux') {
-    options.icon = path.join(__dirname, 'icon.png');
+    options.icon = url.fileURLToPath(new URL('icon.png', import.meta.url));
   }
 
   mainWindow = new BrowserWindow(options);
   mainWindow.on('ready-to-show', () => mainWindow!.show());
 
-  mainWindow.webContents.on('new-window', (event, url) => {
-    event.preventDefault();
-    shell.openExternal(decorateURL(url));
+  mainWindow.webContents.setWindowOpenHandler(details => {
+    shell.openExternal(decorateURL(details.url));
+    return { action: 'deny' };
   });
 
   mainWindow.webContents.session.setPermissionRequestHandler((webContents, permission, done) => {
@@ -96,7 +98,7 @@ export const loadURL = async (appUrl: string) => {
 };
 
 export const loadFile = async (appPath: string) => {
-  mainWindow = await createWindow();
+  mainWindow = await createWindow(appPath === 'index.html' ? '#2f3241' : undefined);
   mainWindow.loadFile(appPath);
   mainWindow.focus();
 };

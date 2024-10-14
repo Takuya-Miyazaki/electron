@@ -6,16 +6,14 @@
 
 #include <utility>
 
-#include "components/viz/common/resources/resource_format.h"
 #include "components/viz/common/resources/resource_sizes.h"
 #include "mojo/public/cpp/system/platform_handle.h"
 #include "skia/ext/platform_canvas.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "third_party/skia/include/core/SkRect.h"
 #include "third_party/skia/src/core/SkDevice.h"
-#include "ui/gfx/skia_util.h"
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 #include "skia/ext/skia_utils_win.h"
 #endif
 
@@ -43,7 +41,7 @@ void LayeredWindowUpdater::OnAllocatedSharedMemory(
   // Make sure |pixel_size| is sane.
   size_t expected_bytes;
   bool size_result = viz::ResourceSizes::MaybeSizeInBytes(
-      pixel_size, viz::ResourceFormat::RGBA_8888, &expected_bytes);
+      pixel_size, viz::SinglePlaneFormat::kRGBA_8888, &expected_bytes);
   if (!size_result)
     return;
 
@@ -71,7 +69,7 @@ void LayeredWindowUpdater::Draw(const gfx::Rect& damage_rect,
 
   if (active_ && canvas_->peekPixels(&pixmap)) {
     bitmap.installPixels(pixmap);
-    callback_.Run(damage_rect, bitmap);
+    callback_.Run(damage_rect, bitmap, {});
   }
 
   std::move(draw_callback).Run();
@@ -90,10 +88,6 @@ void OffScreenHostDisplayClient::SetActive(bool active) {
   }
 }
 
-void OffScreenHostDisplayClient::IsOffscreen(IsOffscreenCallback callback) {
-  std::move(callback).Run(true);
-}
-
 void OffScreenHostDisplayClient::CreateLayeredWindowUpdater(
     mojo::PendingReceiver<viz::mojom::LayeredWindowUpdater> receiver) {
   layered_window_updater_ =
@@ -101,7 +95,7 @@ void OffScreenHostDisplayClient::CreateLayeredWindowUpdater(
   layered_window_updater_->SetActive(active_);
 }
 
-#if defined(OS_LINUX) && !defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_LINUX) && !BUILDFLAG(IS_CHROMEOS)
 void OffScreenHostDisplayClient::DidCompleteSwapWithNewSize(
     const gfx::Size& size) {}
 #endif

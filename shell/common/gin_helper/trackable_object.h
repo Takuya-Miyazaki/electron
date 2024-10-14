@@ -2,13 +2,13 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_COMMON_GIN_HELPER_TRACKABLE_OBJECT_H_
-#define SHELL_COMMON_GIN_HELPER_TRACKABLE_OBJECT_H_
+#ifndef ELECTRON_SHELL_COMMON_GIN_HELPER_TRACKABLE_OBJECT_H_
+#define ELECTRON_SHELL_COMMON_GIN_HELPER_TRACKABLE_OBJECT_H_
 
 #include <vector>
 
-#include "base/bind.h"
 #include "base/memory/weak_ptr.h"
+#include "shell/common/gin_helper/cleaned_up_at_exit.h"
 #include "shell/common/gin_helper/event_emitter.h"
 #include "shell/common/key_weak_map.h"
 
@@ -19,9 +19,13 @@ class SupportsUserData;
 namespace gin_helper {
 
 // Users should use TrackableObject instead.
-class TrackableObjectBase {
+class TrackableObjectBase : public CleanedUpAtExit {
  public:
   TrackableObjectBase();
+
+  // disable copy
+  TrackableObjectBase(const TrackableObjectBase&) = delete;
+  TrackableObjectBase& operator=(const TrackableObjectBase&) = delete;
 
   // The ID in weak map.
   int32_t weak_map_id() const { return weak_map_id_; }
@@ -33,7 +37,7 @@ class TrackableObjectBase {
   static int32_t GetIDFromWrappedClass(base::SupportsUserData* wrapped);
 
  protected:
-  virtual ~TrackableObjectBase();
+  ~TrackableObjectBase() override;
 
   // Returns a closure that can destroy the native class.
   base::OnceClosure GetDestroyClosure();
@@ -43,9 +47,7 @@ class TrackableObjectBase {
  private:
   void Destroy();
 
-  base::WeakPtrFactory<TrackableObjectBase> weak_factory_;
-
-  DISALLOW_COPY_AND_ASSIGN(TrackableObjectBase);
+  base::WeakPtrFactory<TrackableObjectBase> weak_factory_{this};
 };
 
 // All instances of TrackableObject will be kept in a weak map and can be got
@@ -104,7 +106,7 @@ class TrackableObject : public TrackableObjectBase, public EventEmitter<T> {
 
   // Removes this instance from the weak map.
   void RemoveFromWeakMap() {
-    if (weak_map_ && weak_map_->Has(weak_map_id()))
+    if (weak_map_)
       weak_map_->Remove(weak_map_id());
   }
 
@@ -114,18 +116,16 @@ class TrackableObject : public TrackableObjectBase, public EventEmitter<T> {
   ~TrackableObject() override { RemoveFromWeakMap(); }
 
   void InitWith(v8::Isolate* isolate, v8::Local<v8::Object> wrapper) override {
-    gin_helper::WrappableBase::InitWith(isolate, wrapper);
     if (!weak_map_) {
       weak_map_ = new electron::KeyWeakMap<int32_t>;
     }
     weak_map_->Set(isolate, weak_map_id_, wrapper);
+    gin_helper::WrappableBase::InitWith(isolate, wrapper);
   }
 
  private:
   static int32_t next_id_;
   static electron::KeyWeakMap<int32_t>* weak_map_;  // leaked on purpose
-
-  DISALLOW_COPY_AND_ASSIGN(TrackableObject);
 };
 
 template <typename T>
@@ -136,4 +136,4 @@ electron::KeyWeakMap<int32_t>* TrackableObject<T>::weak_map_ = nullptr;
 
 }  // namespace gin_helper
 
-#endif  // SHELL_COMMON_GIN_HELPER_TRACKABLE_OBJECT_H_
+#endif  // ELECTRON_SHELL_COMMON_GIN_HELPER_TRACKABLE_OBJECT_H_

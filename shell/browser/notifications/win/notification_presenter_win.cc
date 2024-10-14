@@ -15,11 +15,9 @@
 #include "base/hash/md5.h"
 #include "base/logging.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/threading/thread_restrictions.h"
 #include "base/time/time.h"
-#include "base/win/windows_version.h"
-#include "shell/browser/notifications/win/notification_presenter_win7.h"
 #include "shell/browser/notifications/win/windows_toast_notification.h"
+#include "shell/common/thread_restrictions.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "ui/gfx/codec/png_codec.h"
 
@@ -38,41 +36,35 @@ bool SaveIconToPath(const SkBitmap& bitmap, const base::FilePath& path) {
   if (!gfx::PNGCodec::EncodeBGRASkBitmap(bitmap, false, &png_data))
     return false;
 
-  char* data = reinterpret_cast<char*>(&png_data[0]);
-  int size = static_cast<int>(png_data.size());
-  return base::WriteFile(path, data, size) == size;
+  return base::WriteFile(path, png_data);
 }
 
 }  // namespace
 
 // static
-NotificationPresenter* NotificationPresenter::Create() {
-  auto version = base::win::GetVersion();
-  if (version < base::win::Version::WIN8)
-    return new NotificationPresenterWin7;
+std::unique_ptr<NotificationPresenter> NotificationPresenter::Create() {
   if (!WindowsToastNotification::Initialize())
-    return nullptr;
-  std::unique_ptr<NotificationPresenterWin> presenter(
-      new NotificationPresenterWin);
+    return {};
+  auto presenter = std::make_unique<NotificationPresenterWin>();
   if (!presenter->Init())
-    return nullptr;
+    return {};
 
   if (IsDebuggingNotifications())
     LOG(INFO) << "Successfully created Windows notifications presenter";
 
-  return presenter.release();
+  return presenter;
 }
 
-NotificationPresenterWin::NotificationPresenterWin() {}
+NotificationPresenterWin::NotificationPresenterWin() = default;
 
-NotificationPresenterWin::~NotificationPresenterWin() {}
+NotificationPresenterWin::~NotificationPresenterWin() = default;
 
 bool NotificationPresenterWin::Init() {
-  base::ThreadRestrictions::ScopedAllowIO allow_io;
+  ScopedAllowBlockingForElectron allow_blocking;
   return temp_dir_.CreateUniqueTempDir();
 }
 
-base::string16 NotificationPresenterWin::SaveIconToFilesystem(
+std::wstring NotificationPresenterWin::SaveIconToFilesystem(
     const SkBitmap& icon,
     const GURL& origin) {
   std::string filename;
@@ -80,17 +72,17 @@ base::string16 NotificationPresenterWin::SaveIconToFilesystem(
   if (origin.is_valid()) {
     filename = base::MD5String(origin.spec()) + ".png";
   } else {
-    base::TimeTicks now = base::TimeTicks::Now();
-    filename = std::to_string(now.ToInternalValue()) + ".png";
+    const int64_t now_usec = base::Time::Now().since_origin().InMicroseconds();
+    filename = base::NumberToString(now_usec) + ".png";
   }
 
-  base::ThreadRestrictions::ScopedAllowIO allow_io;
-  base::FilePath path = temp_dir_.GetPath().Append(base::UTF8ToUTF16(filename));
+  ScopedAllowBlockingForElectron allow_blocking;
+  base::FilePath path = temp_dir_.GetPath().Append(base::UTF8ToWide(filename));
   if (base::PathExists(path))
     return path.value();
   if (SaveIconToPath(icon, path))
     return path.value();
-  return base::UTF8ToUTF16(origin.spec());
+  return base::UTF8ToWide(origin.spec());
 }
 
 Notification* NotificationPresenterWin::CreateNotificationObject(

@@ -7,37 +7,74 @@
 #include <memory>
 #include <string>
 
+#include "electron/buildflags/buildflags.h"
+#include "extensions/browser/guest_view/extensions_guest_view_manager_delegate.h"
 #include "extensions/browser/guest_view/mime_handler_view/mime_handler_view_guest_delegate.h"
 #include "printing/buildflags/buildflags.h"
+#include "shell/browser/api/electron_api_web_contents.h"
 #include "shell/browser/extensions/api/management/electron_management_api_delegate.h"
 #include "shell/browser/extensions/electron_extension_web_contents_observer.h"
 #include "shell/browser/extensions/electron_messaging_delegate.h"
+#include "v8/include/v8.h"
 
-#if BUILDFLAG(ENABLE_PRINT_PREVIEW)
-#include "components/pdf/browser/pdf_web_contents_helper.h"
-#include "shell/browser/electron_pdf_web_contents_helper_client.h"
+#if BUILDFLAG(ENABLE_PRINTING)
+#include "components/printing/browser/print_manager_utils.h"
+#include "shell/browser/printing/print_view_manager_electron.h"
 #endif
 
 namespace extensions {
 
+class ElectronGuestViewManagerDelegate
+    : public ExtensionsGuestViewManagerDelegate {
+ public:
+  ElectronGuestViewManagerDelegate() : ExtensionsGuestViewManagerDelegate() {}
+  ~ElectronGuestViewManagerDelegate() override = default;
+
+  // disable copy
+  ElectronGuestViewManagerDelegate(const ElectronGuestViewManagerDelegate&) =
+      delete;
+  ElectronGuestViewManagerDelegate& operator=(
+      const ElectronGuestViewManagerDelegate&) = delete;
+
+  // GuestViewManagerDelegate:
+  void OnGuestAdded(content::WebContents* guest_web_contents) const override {
+    v8::Isolate* isolate = v8::Isolate::GetCurrent();
+    v8::HandleScope scope(isolate);
+    electron::api::WebContents::FromOrCreate(isolate, guest_web_contents);
+  }
+};
+
 class ElectronMimeHandlerViewGuestDelegate
     : public MimeHandlerViewGuestDelegate {
  public:
-  ElectronMimeHandlerViewGuestDelegate() {}
-  ~ElectronMimeHandlerViewGuestDelegate() override {}
+  ElectronMimeHandlerViewGuestDelegate() = default;
+  ~ElectronMimeHandlerViewGuestDelegate() override = default;
+
+  // disable copy
+  ElectronMimeHandlerViewGuestDelegate(
+      const ElectronMimeHandlerViewGuestDelegate&) = delete;
+  ElectronMimeHandlerViewGuestDelegate& operator=(
+      const ElectronMimeHandlerViewGuestDelegate&) = delete;
 
   // MimeHandlerViewGuestDelegate.
-  bool HandleContextMenu(content::WebContents* web_contents,
+  bool HandleContextMenu(content::RenderFrameHost& render_frame_host,
                          const content::ContextMenuParams& params) override {
-    // TODO(nornagon): surface this event to JS
-    LOG(INFO) << "HCM";
+    auto* web_contents =
+        content::WebContents::FromRenderFrameHost(&render_frame_host);
+    if (!web_contents)
+      return true;
+
+    electron::api::WebContents* api_web_contents =
+        electron::api::WebContents::From(
+            web_contents->GetOutermostWebContents());
+    if (api_web_contents)
+      api_web_contents->HandleContextMenu(render_frame_host, params);
     return true;
   }
-  void RecordLoadMetric(bool in_main_frame,
-                        const std::string& mime_type) override {}
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(ElectronMimeHandlerViewGuestDelegate);
+  void RecordLoadMetric(bool in_main_frame,
+                        const std::string& mime_type,
+                        content::BrowserContext* browser_context) override {}
 };
 
 ElectronExtensionsAPIClient::ElectronExtensionsAPIClient() = default;
@@ -51,13 +88,12 @@ MessagingDelegate* ElectronExtensionsAPIClient::GetMessagingDelegate() {
 
 void ElectronExtensionsAPIClient::AttachWebContentsHelpers(
     content::WebContents* web_contents) const {
+#if BUILDFLAG(ENABLE_PRINTING)
+  electron::PrintViewManagerElectron::CreateForWebContents(web_contents);
+#endif
+
   extensions::ElectronExtensionWebContentsObserver::CreateForWebContents(
       web_contents);
-
-#if BUILDFLAG(ENABLE_PRINT_PREVIEW)
-  pdf::PDFWebContentsHelper::CreateForWebContentsWithClient(
-      web_contents, std::make_unique<ElectronPDFWebContentsHelperClient>());
-#endif
 }
 
 ManagementAPIDelegate*
@@ -69,6 +105,11 @@ std::unique_ptr<MimeHandlerViewGuestDelegate>
 ElectronExtensionsAPIClient::CreateMimeHandlerViewGuestDelegate(
     MimeHandlerViewGuest* guest) const {
   return std::make_unique<ElectronMimeHandlerViewGuestDelegate>();
+}
+
+std::unique_ptr<guest_view::GuestViewManagerDelegate>
+ElectronExtensionsAPIClient::CreateGuestViewManagerDelegate() const {
+  return std::make_unique<ElectronGuestViewManagerDelegate>();
 }
 
 }  // namespace extensions

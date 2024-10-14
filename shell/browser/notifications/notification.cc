@@ -14,7 +14,7 @@ NotificationOptions::~NotificationOptions() = default;
 
 Notification::Notification(NotificationDelegate* delegate,
                            NotificationPresenter* presenter)
-    : delegate_(delegate), presenter_(presenter), weak_factory_(this) {}
+    : delegate_(delegate), presenter_(presenter) {}
 
 Notification::~Notification() {
   if (delegate())
@@ -27,20 +27,26 @@ void Notification::NotificationClicked() {
   Destroy();
 }
 
-void Notification::NotificationDismissed() {
+void Notification::NotificationDismissed(bool should_destroy) {
   if (delegate())
     delegate()->NotificationClosed();
-  Destroy();
+
+  set_is_dismissed(true);
+
+  if (should_destroy)
+    Destroy();
 }
 
-void Notification::NotificationFailed() {
+void Notification::NotificationFailed(const std::string& error) {
   if (delegate())
-    delegate()->NotificationFailed();
+    delegate()->NotificationFailed(error);
   Destroy();
 }
 
 void Notification::Destroy() {
-  presenter()->RemoveNotification(this);
+  if (presenter()) {
+    presenter()->RemoveNotification(this);
+  }
 }
 
 }  // namespace electron

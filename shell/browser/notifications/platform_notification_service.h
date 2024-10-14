@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-CHROMIUM file.
 
-#ifndef SHELL_BROWSER_NOTIFICATIONS_PLATFORM_NOTIFICATION_SERVICE_H_
-#define SHELL_BROWSER_NOTIFICATIONS_PLATFORM_NOTIFICATION_SERVICE_H_
+#ifndef ELECTRON_SHELL_BROWSER_NOTIFICATIONS_PLATFORM_NOTIFICATION_SERVICE_H_
+#define ELECTRON_SHELL_BROWSER_NOTIFICATIONS_PLATFORM_NOTIFICATION_SERVICE_H_
 
-#include <set>
 #include <string>
 
+#include "base/memory/raw_ptr.h"
 #include "content/public/browser/platform_notification_service.h"
 
 namespace electron {
@@ -20,12 +20,18 @@ class PlatformNotificationService
   explicit PlatformNotificationService(ElectronBrowserClient* browser_client);
   ~PlatformNotificationService() override;
 
+  // disable copy
+  PlatformNotificationService(const PlatformNotificationService&) = delete;
+  PlatformNotificationService& operator=(const PlatformNotificationService&) =
+      delete;
+
  protected:
   // content::PlatformNotificationService:
   void DisplayNotification(
-      content::RenderProcessHost* render_process_host,
+      content::RenderFrameHost* render_frame_host,
       const std::string& notification_id,
       const GURL& origin,
+      const GURL& document_url,
       const blink::PlatformNotificationData& notification_data,
       const blink::NotificationResources& notification_resources) override;
   void DisplayPersistentNotification(
@@ -33,10 +39,14 @@ class PlatformNotificationService
       const GURL& service_worker_scope,
       const GURL& origin,
       const blink::PlatformNotificationData& notification_data,
-      const blink::NotificationResources& notification_resources) override;
-  void ClosePersistentNotification(const std::string& notification_id) override;
+      const blink::NotificationResources& notification_resources) override {}
+  void ClosePersistentNotification(
+      const std::string& notification_id) override {}
   void CloseNotification(const std::string& notification_id) override;
   void GetDisplayedNotifications(
+      DisplayedNotificationsCallback callback) override;
+  void GetDisplayedNotificationsForOrigin(
+      const GURL& origin,
       DisplayedNotificationsCallback callback) override;
   int64_t ReadNextPersistentNotificationId() override;
   void RecordNotificationUkmEvent(
@@ -45,11 +55,9 @@ class PlatformNotificationService
   base::Time ReadNextTriggerTimestamp() override;
 
  private:
-  ElectronBrowserClient* browser_client_;
-
-  DISALLOW_COPY_AND_ASSIGN(PlatformNotificationService);
+  raw_ptr<ElectronBrowserClient> browser_client_;
 };
 
 }  // namespace electron
 
-#endif  // SHELL_BROWSER_NOTIFICATIONS_PLATFORM_NOTIFICATION_SERVICE_H_
+#endif  // ELECTRON_SHELL_BROWSER_NOTIFICATIONS_PLATFORM_NOTIFICATION_SERVICE_H_

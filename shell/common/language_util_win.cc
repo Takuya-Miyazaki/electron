@@ -12,34 +12,11 @@
 #include "base/win/core_winrt_util.h"
 #include "base/win/i18n.h"
 #include "base/win/win_util.h"
-#include "base/win/windows_version.h"
 
 namespace electron {
 
-std::vector<std::string> GetPreferredLanguages() {
-  std::vector<base::string16> languages16;
-
-  // Attempt to use API available on Windows 10 or later, which
-  // returns the full list of language preferences.
-  if (!GetPreferredLanguagesUsingGlobalization(&languages16)) {
-    base::win::i18n::GetThreadPreferredUILanguageList(&languages16);
-  }
-
-  std::vector<std::string> languages;
-  for (const auto& language : languages16) {
-    languages.push_back(base::SysWideToUTF8(language));
-  }
-  return languages;
-}
-
 bool GetPreferredLanguagesUsingGlobalization(
-    std::vector<base::string16>* languages) {
-  if (base::win::GetVersion() < base::win::Version::WIN10)
-    return false;
-  if (!base::win::ResolveCoreWinRTDelayload() ||
-      !base::win::ScopedHString::ResolveCoreWinRTStringDelayload())
-    return false;
-
+    std::vector<std::wstring>* languages) {
   base::win::ScopedHString guid = base::win::ScopedHString::Create(
       RuntimeClass_Windows_System_UserProfile_GlobalizationPreferences);
   Microsoft::WRL::ComPtr<
@@ -65,12 +42,28 @@ bool GetPreferredLanguagesUsingGlobalization(
     HSTRING hstr;
     hr = langs->GetAt(i, &hstr);
     if (SUCCEEDED(hr)) {
-      base::WStringPiece str = base::win::ScopedHString(hstr).Get();
+      std::wstring_view str = base::win::ScopedHString(hstr).Get();
       languages->emplace_back(str.data(), str.size());
     }
   }
 
   return true;
+}
+
+std::vector<std::string> GetPreferredLanguages() {
+  std::vector<std::wstring> languages16;
+
+  // Attempt to use API available on Windows 10 or later, which
+  // returns the full list of language preferences.
+  if (!GetPreferredLanguagesUsingGlobalization(&languages16)) {
+    base::win::i18n::GetThreadPreferredUILanguageList(&languages16);
+  }
+
+  std::vector<std::string> languages;
+  for (const auto& language : languages16) {
+    languages.push_back(base::SysWideToUTF8(language));
+  }
+  return languages;
 }
 
 }  // namespace electron

@@ -4,43 +4,36 @@
 
 #include "shell/browser/api/electron_api_screen.h"
 
-#include <algorithm>
 #include <string>
+#include <string_view>
 
-#include "base/bind.h"
-#include "gin/dictionary.h"
+#include "base/functional/bind.h"
 #include "gin/handle.h"
 #include "shell/browser/browser.h"
 #include "shell/common/gin_converters/callback_converter.h"
 #include "shell/common/gin_converters/gfx_converter.h"
 #include "shell/common/gin_converters/native_window_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
+#include "shell/common/gin_helper/error_thrower.h"
 #include "shell/common/gin_helper/object_template_builder.h"
 #include "shell/common/node_includes.h"
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
 #include "ui/gfx/geometry/point.h"
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 #include "ui/display/win/screen_win.h"
 #endif
 
-namespace electron {
+#if defined(USE_OZONE)
+#include "ui/ozone/public/ozone_platform.h"
+#endif
 
-namespace api {
+namespace electron::api {
 
 gin::WrapperInfo Screen::kWrapperInfo = {gin::kEmbedderNativeGin};
 
 namespace {
-
-// Find an item in container according to its ID.
-template <class T>
-typename T::iterator FindById(T* container, int id) {
-  auto predicate = [id](const typename T::value_type& item) -> bool {
-    return item.id() == id;
-  };
-  return std::find_if(container->begin(), container->end(), predicate);
-}
 
 // Convert the changed_metrics bitmask to string array.
 std::vector<std::string> MetricsToArray(uint32_t metrics) {
@@ -57,13 +50,13 @@ std::vector<std::string> MetricsToArray(uint32_t metrics) {
 }
 
 void DelayEmit(Screen* screen,
-               base::StringPiece name,
+               const std::string_view name,
                const display::Display& display) {
   screen->Emit(name, display);
 }
 
 void DelayEmitWithMetrics(Screen* screen,
-                          base::StringPiece name,
+                          const std::string_view name,
                           const display::Display& display,
                           const std::vector<std::string>& metrics) {
   screen->Emit(name, display, metrics);
@@ -80,27 +73,22 @@ Screen::~Screen() {
   screen_->RemoveObserver(this);
 }
 
-gfx::Point Screen::GetCursorScreenPoint() {
+gfx::Point Screen::GetCursorScreenPoint(v8::Isolate* isolate) {
+#if defined(USE_OZONE)
+  // Wayland will crash unless a window is created prior to calling
+  // GetCursorScreenPoint.
+  if (!ui::OzonePlatform::IsInitialized()) {
+    gin_helper::ErrorThrower thrower(isolate);
+    thrower.ThrowError(
+        "screen.getCursorScreenPoint() cannot be called before a window has "
+        "been created.");
+    return gfx::Point();
+  }
+#endif
   return screen_->GetCursorScreenPoint();
 }
 
-display::Display Screen::GetPrimaryDisplay() {
-  return screen_->GetPrimaryDisplay();
-}
-
-std::vector<display::Display> Screen::GetAllDisplays() {
-  return screen_->GetAllDisplays();
-}
-
-display::Display Screen::GetDisplayNearestPoint(const gfx::Point& point) {
-  return screen_->GetDisplayNearestPoint(point);
-}
-
-display::Display Screen::GetDisplayMatching(const gfx::Rect& match_rect) {
-  return screen_->GetDisplayMatching(match_rect);
-}
-
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 
 static gfx::Rect ScreenToDIPRect(electron::NativeWindow* window,
                                  const gfx::Rect& rect) {
@@ -117,23 +105,25 @@ static gfx::Rect DIPToScreenRect(electron::NativeWindow* window,
 #endif
 
 void Screen::OnDisplayAdded(const display::Display& new_display) {
-  base::ThreadTaskRunnerHandle::Get()->PostNonNestableTask(
-      FROM_HERE, base::Bind(&DelayEmit, base::Unretained(this), "display-added",
-                            new_display));
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostNonNestableTask(
+      FROM_HERE, base::BindOnce(&DelayEmit, base::Unretained(this),
+                                "display-added", new_display));
 }
 
-void Screen::OnDisplayRemoved(const display::Display& old_display) {
-  base::ThreadTaskRunnerHandle::Get()->PostNonNestableTask(
-      FROM_HERE, base::Bind(&DelayEmit, base::Unretained(this),
-                            "display-removed", old_display));
+void Screen::OnDisplaysRemoved(const display::Displays& old_displays) {
+  for (const auto& old_display : old_displays) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostNonNestableTask(
+        FROM_HERE, base::BindOnce(&DelayEmit, base::Unretained(this),
+                                  "display-removed", old_display));
+  }
 }
 
 void Screen::OnDisplayMetricsChanged(const display::Display& display,
                                      uint32_t changed_metrics) {
-  base::ThreadTaskRunnerHandle::Get()->PostNonNestableTask(
-      FROM_HERE, base::Bind(&DelayEmitWithMetrics, base::Unretained(this),
-                            "display-metrics-changed", display,
-                            MetricsToArray(changed_metrics)));
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostNonNestableTask(
+      FROM_HERE, base::BindOnce(&DelayEmitWithMetrics, base::Unretained(this),
+                                "display-metrics-changed", display,
+                                MetricsToArray(changed_metrics)));
 }
 
 // static
@@ -163,7 +153,7 @@ gin::ObjectTemplateBuilder Screen::GetObjectTemplateBuilder(
       .SetMethod("getPrimaryDisplay", &Screen::GetPrimaryDisplay)
       .SetMethod("getAllDisplays", &Screen::GetAllDisplays)
       .SetMethod("getDisplayNearestPoint", &Screen::GetDisplayNearestPoint)
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
       .SetMethod("screenToDipPoint", &display::win::ScreenWin::ScreenToDIPPoint)
       .SetMethod("dipToScreenPoint", &display::win::ScreenWin::DIPToScreenPoint)
       .SetMethod("screenToDipRect", &ScreenToDIPRect)
@@ -176,9 +166,7 @@ const char* Screen::GetTypeName() {
   return "Screen";
 }
 
-}  // namespace api
-
-}  // namespace electron
+}  // namespace electron::api
 
 namespace {
 
@@ -195,4 +183,4 @@ void Initialize(v8::Local<v8::Object> exports,
 
 }  // namespace
 
-NODE_LINKED_MODULE_CONTEXT_AWARE(electron_common_screen, Initialize)
+NODE_LINKED_BINDING_CONTEXT_AWARE(electron_browser_screen, Initialize)

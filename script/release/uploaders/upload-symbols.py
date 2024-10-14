@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import glob
 import os
@@ -14,8 +14,8 @@ def is_fs_case_sensitive():
 sys.path.append(
   os.path.abspath(os.path.dirname(os.path.abspath(__file__)) + "/../.."))
 
-from lib.config import PLATFORM, s3_config, enable_verbose_mode
-from lib.util import get_electron_branding, execute, rm_rf, safe_mkdir, s3put, \
+from lib.config import PLATFORM
+from lib.util import get_electron_branding, execute, store_artifact, \
                      get_out_dir, ELECTRON_DIR
 
 RELEASE_DIR = get_out_dir()
@@ -26,8 +26,10 @@ PRODUCT_NAME = get_electron_branding()['product_name']
 SYMBOLS_DIR = os.path.join(RELEASE_DIR, 'breakpad_symbols')
 
 PDB_LIST = [
-  os.path.join(RELEASE_DIR, '{0}.exe.pdb'.format(PROJECT_NAME))
+  os.path.join(RELEASE_DIR, f'{PROJECT_NAME}.exe.pdb')
 ]
+
+PDB_LIST += glob.glob(os.path.join(RELEASE_DIR, '*.dll.pdb'))
 
 NPX_CMD = "npx"
 if sys.platform == "win32":
@@ -46,11 +48,15 @@ def main():
 
   for symbol_file in files:
     print("Generating Sentry src bundle for: " + symbol_file)
-    subprocess.check_output([NPX_CMD, '@sentry/cli@1.51.1', 'difutil', 'bundle-sources', symbol_file])
+    npx_env = os.environ.copy()
+    npx_env['npm_config_yes'] = 'true'
+    subprocess.check_output([
+      NPX_CMD, '@sentry/cli@1.62.0', 'difutil', 'bundle-sources',
+      symbol_file], env=npx_env)
 
   files += glob.glob(SYMBOLS_DIR + '/*/*/*.src.zip')
 
-  # The file upload needs to be atom-shell/symbols/:symbol_name/:hash/:symbol
+  # The file upload needs to be symbols/:symbol_name/:hash/:symbol
   os.chdir(SYMBOLS_DIR)
   files = [os.path.relpath(f, os.getcwd()) for f in files]
 
@@ -70,16 +76,21 @@ def main():
   for f in files:
     assert os.path.exists(f)
 
-  bucket, access_key, secret_key = s3_config()
-  upload_symbols(bucket, access_key, secret_key, files)
+  upload_symbols(files)
 
 
 def run_symstore(pdb, dest, product):
-  execute(['symstore', 'add', '/r', '/f', pdb, '/s', dest, '/t', product])
+  for attempt in range(2):
+    try:
+      execute(['symstore', 'add', '/r', '/f', pdb, '/s', dest, '/t', product])
+      break
+    except Exception as e:
+      print(f"An error occurred while adding '{pdb}' to SymStore: {str(e)}")
+      if attempt == 0:
+        print("Retrying...")
 
-
-def upload_symbols(bucket, access_key, secret_key, files):
-  s3put(bucket, access_key, secret_key, SYMBOLS_DIR, 'atom-shell/symbols',
+def upload_symbols(files):
+  store_artifact(SYMBOLS_DIR, 'symbols',
         files)
 
 

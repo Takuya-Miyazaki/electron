@@ -2,27 +2,29 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_API_ELECTRON_API_IN_APP_PURCHASE_H_
-#define SHELL_BROWSER_API_ELECTRON_API_IN_APP_PURCHASE_H_
+#ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_IN_APP_PURCHASE_H_
+#define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_IN_APP_PURCHASE_H_
 
 #include <string>
 #include <vector>
 
-#include "gin/handle.h"
 #include "gin/wrappable.h"
 #include "shell/browser/event_emitter_mixin.h"
 #include "shell/browser/mac/in_app_purchase.h"
 #include "shell/browser/mac/in_app_purchase_observer.h"
 #include "shell/browser/mac/in_app_purchase_product.h"
-#include "v8/include/v8.h"
+#include "v8/include/v8-forward.h"
 
-namespace electron {
+namespace gin {
+template <typename T>
+class Handle;
+}  // namespace gin
 
-namespace api {
+namespace electron::api {
 
-class InAppPurchase : public gin::Wrappable<InAppPurchase>,
-                      public gin_helper::EventEmitterMixin<InAppPurchase>,
-                      public in_app_purchase::TransactionObserver {
+class InAppPurchase final : public gin::Wrappable<InAppPurchase>,
+                            public gin_helper::EventEmitterMixin<InAppPurchase>,
+                            private in_app_purchase::TransactionObserver {
  public:
   static gin::Handle<InAppPurchase> Create(v8::Isolate* isolate);
 
@@ -31,6 +33,10 @@ class InAppPurchase : public gin::Wrappable<InAppPurchase>,
   gin::ObjectTemplateBuilder GetObjectTemplateBuilder(
       v8::Isolate* isolate) override;
   const char* GetTypeName() override;
+
+  // disable copy
+  InAppPurchase(const InAppPurchase&) = delete;
+  InAppPurchase& operator=(const InAppPurchase&) = delete;
 
  protected:
   InAppPurchase();
@@ -45,13 +51,8 @@ class InAppPurchase : public gin::Wrappable<InAppPurchase>,
   // TransactionObserver:
   void OnTransactionsUpdated(
       const std::vector<in_app_purchase::Transaction>& transactions) override;
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(InAppPurchase);
 };
 
-}  // namespace api
+}  // namespace electron::api
 
-}  // namespace electron
-
-#endif  // SHELL_BROWSER_API_ELECTRON_API_IN_APP_PURCHASE_H_
+#endif  // ELECTRON_SHELL_BROWSER_API_ELECTRON_API_IN_APP_PURCHASE_H_

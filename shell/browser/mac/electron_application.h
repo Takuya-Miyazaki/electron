@@ -2,8 +2,10 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#include "base/callback.h"
-#include "base/mac/scoped_nsobject.h"
+#ifndef ELECTRON_SHELL_BROWSER_MAC_ELECTRON_APPLICATION_H_
+#define ELECTRON_SHELL_BROWSER_MAC_ELECTRON_APPLICATION_H_
+
+#include "base/functional/callback.h"
 #include "base/mac/scoped_sending_event.h"
 
 #import <AVFoundation/AVFoundation.h>
@@ -14,16 +16,16 @@
                                             NSUserActivityDelegate> {
  @private
   BOOL handlingSendEvent_;
-  base::scoped_nsobject<NSUserActivity> currentActivity_;
+  NSUserActivity* __strong currentActivity_;
   NSCondition* handoffLock_;
   BOOL updateReceived_;
   BOOL userStoppedShutdown_;
-  base::Callback<bool()> shouldShutdown_;
+  base::RepeatingCallback<bool()> shouldShutdown_;
 }
 
 + (AtomApplication*)sharedApplication;
 
-- (void)setShutdownHandler:(base::Callback<bool()>)handler;
+- (void)setShutdownHandler:(base::RepeatingCallback<bool()>)handler;
 - (void)registerURLHandler;
 
 // Called when macOS itself is shutting down.
@@ -45,3 +47,5 @@
                  withUserInfo:(NSDictionary*)userInfo;
 
 @end
+
+#endif  // ELECTRON_SHELL_BROWSER_MAC_ELECTRON_APPLICATION_H_

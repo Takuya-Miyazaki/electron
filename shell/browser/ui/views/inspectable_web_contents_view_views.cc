@@ -5,13 +5,15 @@
 #include "shell/browser/ui/views/inspectable_web_contents_view_views.h"
 
 #include <memory>
-
 #include <utility>
 
-#include "base/strings/utf_string_conversions.h"
+#include "base/memory/raw_ptr.h"
+#include "shell/browser/ui/drag_util.h"
 #include "shell/browser/ui/inspectable_web_contents.h"
 #include "shell/browser/ui/inspectable_web_contents_delegate.h"
 #include "shell/browser/ui/inspectable_web_contents_view_delegate.h"
+#include "ui/base/models/image_model.h"
+#include "ui/gfx/geometry/rounded_corners_f.h"
 #include "ui/views/controls/label.h"
 #include "ui/views/controls/webview/webview.h"
 #include "ui/views/widget/widget.h"
@@ -32,7 +34,7 @@ class DevToolsWindowDelegate : public views::ClientView,
         shell_(shell),
         view_(view),
         widget_(widget) {
-    // A WidgetDelegate should be deleted on DeleteDelegate.
+    SetOwnedByWidget(true);
     set_owned_by_client();
 
     if (shell->GetDelegate())
@@ -40,15 +42,15 @@ class DevToolsWindowDelegate : public views::ClientView,
   }
   ~DevToolsWindowDelegate() override = default;
 
+  // disable copy
+  DevToolsWindowDelegate(const DevToolsWindowDelegate&) = delete;
+  DevToolsWindowDelegate& operator=(const DevToolsWindowDelegate&) = delete;
+
   // views::WidgetDelegate:
-  void DeleteDelegate() override { delete this; }
   views::View* GetInitiallyFocusedView() override { return view_; }
-  bool CanResize() const override { return true; }
-  bool CanMaximize() const override { return true; }
-  bool CanMinimize() const override { return true; }
-  base::string16 GetWindowTitle() const override { return shell_->GetTitle(); }
-  gfx::ImageSkia GetWindowAppIcon() override { return GetWindowIcon(); }
-  gfx::ImageSkia GetWindowIcon() override { return icon_; }
+  std::u16string GetWindowTitle() const override { return shell_->GetTitle(); }
+  ui::ImageModel GetWindowAppIcon() override { return GetWindowIcon(); }
+  ui::ImageModel GetWindowIcon() override { return icon_; }
   views::Widget* GetWidget() override { return widget_; }
   const views::Widget* GetWidget() const override { return widget_; }
   views::View* GetContentsView() override { return view_; }
@@ -63,12 +65,10 @@ class DevToolsWindowDelegate : public views::ClientView,
   }
 
  private:
-  InspectableWebContentsViewViews* shell_;
-  views::View* view_;
-  views::Widget* widget_;
-  gfx::ImageSkia icon_;
-
-  DISALLOW_COPY_AND_ASSIGN(DevToolsWindowDelegate);
+  raw_ptr<InspectableWebContentsViewViews> shell_;
+  raw_ptr<views::View> view_;
+  raw_ptr<views::Widget> widget_;
+  ui::ImageModel icon_;
 };
 
 }  // namespace
@@ -80,27 +80,22 @@ InspectableWebContentsView* CreateInspectableContentsView(
 
 InspectableWebContentsViewViews::InspectableWebContentsViewViews(
     InspectableWebContents* inspectable_web_contents)
-    : inspectable_web_contents_(inspectable_web_contents),
-      devtools_window_web_view_(nullptr),
-      contents_web_view_(nullptr),
+    : InspectableWebContentsView(inspectable_web_contents),
       devtools_web_view_(new views::WebView(nullptr)),
-      devtools_visible_(false),
-      devtools_window_delegate_(nullptr),
-      title_(base::ASCIIToUTF16("Developer Tools")) {
-  if (!inspectable_web_contents_->IsGuest() &&
+      title_(u"Developer Tools") {
+  if (!inspectable_web_contents_->is_guest() &&
       inspectable_web_contents_->GetWebContents()->GetNativeView()) {
-    views::WebView* contents_web_view = new views::WebView(nullptr);
+    auto* contents_web_view = new views::WebView(nullptr);
     contents_web_view->SetWebContents(
         inspectable_web_contents_->GetWebContents());
-    contents_web_view_ = contents_web_view;
+    contents_view_ = contents_web_view_ = contents_web_view;
   } else {
-    contents_web_view_ =
-        new views::Label(base::ASCIIToUTF16("No content under offscreen mode"));
+    contents_view_ = new views::Label(u"No content under offscreen mode");
   }
 
   devtools_web_view_->SetVisible(false);
-  AddChildView(devtools_web_view_);
-  AddChildView(contents_web_view_);
+  AddChildView(devtools_web_view_.get());
+  AddChildView(contents_view_.get());
 }
 
 InspectableWebContentsViewViews::~InspectableWebContentsViewViews() {
@@ -113,8 +108,13 @@ views::View* InspectableWebContentsViewViews::GetView() {
   return this;
 }
 
-views::View* InspectableWebContentsViewViews::GetWebView() {
-  return contents_web_view_;
+void InspectableWebContentsViewViews::SetCornerRadii(
+    const gfx::RoundedCornersF& corner_radii) {
+  // WebView won't exist for offscreen rendering.
+  if (contents_web_view_) {
+    contents_web_view_->holder()->SetCornerRadii(
+        gfx::RoundedCornersF(corner_radii));
+  }
 }
 
 void InspectableWebContentsViewViews::ShowDevTools(bool activate) {
@@ -125,19 +125,22 @@ void InspectableWebContentsViewViews::ShowDevTools(bool activate) {
   if (devtools_window_) {
     devtools_window_web_view_->SetWebContents(
         inspectable_web_contents_->GetDevToolsWebContents());
-    devtools_window_->SetBounds(
-        inspectable_web_contents()->GetDevToolsBounds());
+    devtools_window_->SetBounds(inspectable_web_contents()->dev_tools_bounds());
     if (activate) {
       devtools_window_->Show();
     } else {
       devtools_window_->ShowInactive();
     }
+
+    // Update draggable regions to account for the new dock position.
+    if (GetDelegate())
+      GetDelegate()->DevToolsResized();
   } else {
     devtools_web_view_->SetVisible(true);
     devtools_web_view_->SetWebContents(
         inspectable_web_contents_->GetDevToolsWebContents());
     devtools_web_view_->RequestFocus();
-    Layout();
+    DeprecatedLayoutImmediately();
   }
 }
 
@@ -147,15 +150,18 @@ void InspectableWebContentsViewViews::CloseDevTools() {
 
   devtools_visible_ = false;
   if (devtools_window_) {
-    inspectable_web_contents()->SaveDevToolsBounds(
-        devtools_window_->GetWindowBoundsInScreen());
+    auto save_bounds = devtools_window_->IsMinimized()
+                           ? devtools_window_->GetRestoredBounds()
+                           : devtools_window_->GetWindowBoundsInScreen();
+    inspectable_web_contents()->SaveDevToolsBounds(save_bounds);
+
     devtools_window_.reset();
     devtools_window_web_view_ = nullptr;
     devtools_window_delegate_ = nullptr;
   } else {
     devtools_web_view_->SetVisible(false);
     devtools_web_view_->SetWebContents(nullptr);
-    Layout();
+    DeprecatedLayoutImmediately();
   }
 }
 
@@ -181,12 +187,13 @@ void InspectableWebContentsViewViews::SetIsDocked(bool docked, bool activate) {
     devtools_window_delegate_ = new DevToolsWindowDelegate(
         this, devtools_window_web_view_, devtools_window_.get());
 
-    views::Widget::InitParams params;
+    views::Widget::InitParams params{
+        views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET};
     params.ownership = views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET;
     params.delegate = devtools_window_delegate_;
-    params.bounds = inspectable_web_contents()->GetDevToolsBounds();
+    params.bounds = inspectable_web_contents()->dev_tools_bounds();
 
-#if defined(USE_X11)
+#if BUILDFLAG(IS_LINUX)
     params.wm_role_name = "devtools";
     if (GetDelegate())
       GetDelegate()->GetDevToolsWindowWMClass(&params.wm_class_name,
@@ -195,6 +202,7 @@ void InspectableWebContentsViewViews::SetIsDocked(bool docked, bool activate) {
 
     devtools_window_->Init(std::move(params));
     devtools_window_->UpdateWindowIcon();
+    devtools_window_->widget_delegate()->SetHasWindowSizeControls(true);
   }
 
   ShowDevTools(activate);
@@ -203,19 +211,25 @@ void InspectableWebContentsViewViews::SetIsDocked(bool docked, bool activate) {
 void InspectableWebContentsViewViews::SetContentsResizingStrategy(
     const DevToolsContentsResizingStrategy& strategy) {
   strategy_.CopyFrom(strategy);
-  Layout();
+  DeprecatedLayoutImmediately();
 }
 
-void InspectableWebContentsViewViews::SetTitle(const base::string16& title) {
+void InspectableWebContentsViewViews::SetTitle(const std::u16string& title) {
   if (devtools_window_) {
     title_ = title;
     devtools_window_->UpdateWindowTitle();
   }
 }
 
-void InspectableWebContentsViewViews::Layout() {
+const std::u16string InspectableWebContentsViewViews::GetTitle() {
+  return title_;
+}
+
+void InspectableWebContentsViewViews::Layout(PassKey) {
   if (!devtools_web_view_->GetVisible()) {
-    contents_web_view_->SetBoundsRect(GetContentsBounds());
+    contents_view_->SetBoundsRect(GetContentsBounds());
+    // Propagate layout call to all children, for example browser views.
+    LayoutSuperclass<View>(this);
     return;
   }
 
@@ -231,7 +245,13 @@ void InspectableWebContentsViewViews::Layout() {
   new_contents_bounds.set_x(GetMirroredXForRect(new_contents_bounds));
 
   devtools_web_view_->SetBoundsRect(new_devtools_bounds);
-  contents_web_view_->SetBoundsRect(new_contents_bounds);
+  contents_view_->SetBoundsRect(new_contents_bounds);
+
+  // Propagate layout call to all children, for example browser views.
+  LayoutSuperclass<View>(this);
+
+  if (GetDelegate())
+    GetDelegate()->DevToolsResized();
 }
 
 }  // namespace electron

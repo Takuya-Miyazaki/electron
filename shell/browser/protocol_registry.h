@@ -2,17 +2,18 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_PROTOCOL_REGISTRY_H_
-#define SHELL_BROWSER_PROTOCOL_REGISTRY_H_
+#ifndef ELECTRON_SHELL_BROWSER_PROTOCOL_REGISTRY_H_
+#define ELECTRON_SHELL_BROWSER_PROTOCOL_REGISTRY_H_
 
 #include <string>
+#include <string_view>
 
 #include "content/public/browser/content_browser_client.h"
 #include "shell/browser/net/electron_url_loader_factory.h"
 
 namespace content {
 class BrowserContext;
-}  // namespace content
+}
 
 namespace electron {
 
@@ -26,8 +27,11 @@ class ProtocolRegistry {
       content::ContentBrowserClient::URLLoaderFactoryType;
 
   void RegisterURLLoaderFactories(
-      URLLoaderFactoryType type,
-      content::ContentBrowserClient::NonNetworkURLLoaderFactoryMap* factories);
+      content::ContentBrowserClient::NonNetworkURLLoaderFactoryMap* factories,
+      bool allow_file_access);
+
+  mojo::PendingRemote<network::mojom::URLLoaderFactory>
+  CreateNonNetworkNavigationURLLoaderFactory(const std::string& scheme);
 
   const HandlersMap& intercept_handlers() const { return intercept_handlers_; }
 
@@ -35,13 +39,17 @@ class ProtocolRegistry {
                         const std::string& scheme,
                         const ProtocolHandler& handler);
   bool UnregisterProtocol(const std::string& scheme);
-  bool IsProtocolRegistered(const std::string& scheme);
+
+  [[nodiscard]] const HandlersMap::mapped_type* FindRegistered(
+      std::string_view scheme) const;
 
   bool InterceptProtocol(ProtocolType type,
                          const std::string& scheme,
                          const ProtocolHandler& handler);
   bool UninterceptProtocol(const std::string& scheme);
-  bool IsProtocolIntercepted(const std::string& scheme);
+
+  [[nodiscard]] const HandlersMap::mapped_type* FindIntercepted(
+      std::string_view scheme) const;
 
  private:
   friend class ElectronBrowserContext;
@@ -54,4 +62,4 @@ class ProtocolRegistry {
 
 }  // namespace electron
 
-#endif  // SHELL_BROWSER_PROTOCOL_REGISTRY_H_
+#endif  // ELECTRON_SHELL_BROWSER_PROTOCOL_REGISTRY_H_

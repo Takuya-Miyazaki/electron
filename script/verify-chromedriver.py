@@ -1,14 +1,10 @@
-#!/usr/bin/env python
-
-from __future__ import print_function
+#!/usr/bin/env python3
 
 import argparse
 import os
 import re
-import shlex
 import subprocess
 import sys
-import time
 
 SOURCE_ROOT = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 
@@ -19,25 +15,29 @@ def main():
   chromedriver_name = {
     'darwin': 'chromedriver',
     'win32': 'chromedriver.exe',
+    'linux': 'chromedriver',
     'linux2': 'chromedriver'
 }
 
   chromedriver_path = os.path.join(
     args.source_root, args.build_dir, chromedriver_name[sys.platform])
-  proc = subprocess.Popen([chromedriver_path],
-                          stdout=subprocess.PIPE, universal_newlines=True)
-  try:
-    output = proc.stdout.readline()
-  except KeyboardInterrupt:
-    returncode = 0
-  finally:
-    proc.terminate()
+  with subprocess.Popen([chromedriver_path],
+                        stdout=subprocess.PIPE,
+                        universal_newlines=True) as proc:
+    try:
+      output = proc.stdout.readline()
+    except KeyboardInterrupt:
+      returncode = 0
+    finally:
+      proc.terminate()
 
   returncode = 0
   match = re.search(
-    '^Starting ChromeDriver [0-9]+.[0-9]+.[0-9]+.[0-9]+ .* on port [0-9]+$', output)
+    '^Starting ChromeDriver [0-9]+.[0-9]+.[0-9]+.[0-9]+ .* on port [0-9]+$',
+    output
+  )
 
-  if match == None:
+  if match is None:
     returncode = 1
 
   if returncode == 0:

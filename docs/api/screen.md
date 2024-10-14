@@ -14,20 +14,29 @@ property, so writing `let { screen } = require('electron')` will not work.
 
 An example of creating a window that fills the whole screen:
 
-```javascript fiddle='docs/fiddles/screen/fit-screen'
-const { app, BrowserWindow, screen } = require('electron')
+```fiddle docs/fiddles/screen/fit-screen
+// Retrieve information about screen size, displays, cursor position, etc.
+//
+// For more info, see:
+// https://www.electronjs.org/docs/latest/api/screen
 
-let win
+const { app, BrowserWindow, screen } = require('electron/main')
+
+let mainWindow = null
+
 app.whenReady().then(() => {
-  const { width, height } = screen.getPrimaryDisplay().workAreaSize
-  win = new BrowserWindow({ width, height })
-  win.loadURL('https://github.com')
+  // Create a window that fills the screen's available work area.
+  const primaryDisplay = screen.getPrimaryDisplay()
+  const { width, height } = primaryDisplay.workAreaSize
+
+  mainWindow = new BrowserWindow({ width, height })
+  mainWindow.loadURL('https://electronjs.org')
 })
 ```
 
 Another example of creating a window in the external display:
 
-```javascript
+```js
 const { app, BrowserWindow, screen } = require('electron')
 
 let win
@@ -76,7 +85,7 @@ Returns:
 
 * `event` Event
 * `display` [Display](structures/display.md)
-* `changedMetrics` String[]
+* `changedMetrics` string[]
 
 Emitted when one or more metrics change in a `display`. The `changedMetrics` is
 an array of strings that describe the changes. Possible changes are `bounds`,
@@ -91,6 +100,8 @@ The `screen` module has the following methods:
 Returns [`Point`](structures/point.md)
 
 The current absolute position of the mouse pointer.
+
+**Note:** The return value is a DIP point, not a screen physical point.
 
 ### `screen.getPrimaryDisplay()`
 

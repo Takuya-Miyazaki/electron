@@ -5,22 +5,24 @@
 #include "shell/browser/api/electron_api_tray.h"
 
 #include <string>
+#include <string_view>
 
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/containers/fixed_flat_map.h"
 #include "gin/dictionary.h"
+#include "gin/handle.h"
 #include "gin/object_template_builder.h"
 #include "shell/browser/api/electron_api_menu.h"
 #include "shell/browser/api/ui_event.h"
 #include "shell/browser/browser.h"
 #include "shell/browser/javascript_environment.h"
 #include "shell/common/api/electron_api_native_image.h"
+#include "shell/common/gin_converters/file_path_converter.h"
 #include "shell/common/gin_converters/gfx_converter.h"
 #include "shell/common/gin_converters/guid_converter.h"
 #include "shell/common/gin_converters/image_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
-#include "shell/common/gin_helper/function_template_extensions.h"
+#include "shell/common/gin_helper/error_thrower.h"
 #include "shell/common/node_includes.h"
-#include "ui/gfx/image/image.h"
 
 namespace gin {
 
@@ -29,43 +31,30 @@ struct Converter<electron::TrayIcon::IconType> {
   static bool FromV8(v8::Isolate* isolate,
                      v8::Local<v8::Value> val,
                      electron::TrayIcon::IconType* out) {
-    using IconType = electron::TrayIcon::IconType;
-    std::string mode;
-    if (ConvertFromV8(isolate, val, &mode)) {
-      if (mode == "none") {
-        *out = IconType::None;
-        return true;
-      } else if (mode == "info") {
-        *out = IconType::Info;
-        return true;
-      } else if (mode == "warning") {
-        *out = IconType::Warning;
-        return true;
-      } else if (mode == "error") {
-        *out = IconType::Error;
-        return true;
-      } else if (mode == "custom") {
-        *out = IconType::Custom;
-        return true;
-      }
-    }
-    return false;
+    using Val = electron::TrayIcon::IconType;
+    static constexpr auto Lookup =
+        base::MakeFixedFlatMap<std::string_view, Val>({
+            {"custom", Val::kCustom},
+            {"error", Val::kError},
+            {"info", Val::kInfo},
+            {"none", Val::kNone},
+            {"warning", Val::kWarning},
+        });
+    return FromV8WithLookup(isolate, val, Lookup, out);
   }
 };
 
 }  // namespace gin
 
-namespace electron {
-
-namespace api {
+namespace electron::api {
 
 gin::WrapperInfo Tray::kWrapperInfo = {gin::kEmbedderNativeGin};
 
-Tray::Tray(gin::Handle<NativeImage> image,
-           base::Optional<UUID> guid,
-           gin::Arguments* args)
+Tray::Tray(v8::Isolate* isolate,
+           v8::Local<v8::Value> image,
+           std::optional<UUID> guid)
     : tray_icon_(TrayIcon::Create(guid)) {
-  SetImage(image);
+  SetImage(isolate, image);
   tray_icon_->AddObserver(this);
 }
 
@@ -73,22 +62,35 @@ Tray::~Tray() = default;
 
 // static
 gin::Handle<Tray> Tray::New(gin_helper::ErrorThrower thrower,
-                            gin::Handle<NativeImage> image,
-                            base::Optional<UUID> guid,
+                            v8::Local<v8::Value> image,
+                            std::optional<UUID> guid,
                             gin::Arguments* args) {
   if (!Browser::Get()->is_ready()) {
     thrower.ThrowError("Cannot create Tray before app is ready");
     return gin::Handle<Tray>();
   }
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
   if (!guid.has_value() && args->Length() > 1) {
     thrower.ThrowError("Invalid GUID format");
     return gin::Handle<Tray>();
   }
 #endif
 
-  return gin::CreateHandle(thrower.isolate(), new Tray(image, guid, args));
+  // Error thrown by us will be dropped when entering V8.
+  // Make sure to abort early and propagate the error to JS.
+  // Refs https://chromium-review.googlesource.com/c/v8/v8/+/5050065
+  v8::TryCatch try_catch(args->isolate());
+  auto* tray = new Tray(args->isolate(), image, guid);
+  if (try_catch.HasCaught()) {
+    delete tray;
+    try_catch.ReThrow();
+    return gin::Handle<Tray>();
+  }
+
+  auto handle = gin::CreateHandle(args->isolate(), tray);
+  handle->Pin(args->isolate());
+  return handle;
 }
 
 void Tray::OnClicked(const gfx::Rect& bounds,
@@ -96,19 +98,25 @@ void Tray::OnClicked(const gfx::Rect& bounds,
                      int modifiers) {
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope scope(isolate);
-  EmitCustomEvent("click", CreateEventFromFlags(modifiers), bounds, location);
+  EmitWithoutEvent("click", CreateEventFromFlags(modifiers), bounds, location);
 }
 
 void Tray::OnDoubleClicked(const gfx::Rect& bounds, int modifiers) {
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope scope(isolate);
-  EmitCustomEvent("double-click", CreateEventFromFlags(modifiers), bounds);
+  EmitWithoutEvent("double-click", CreateEventFromFlags(modifiers), bounds);
 }
 
 void Tray::OnRightClicked(const gfx::Rect& bounds, int modifiers) {
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope scope(isolate);
-  EmitCustomEvent("right-click", CreateEventFromFlags(modifiers), bounds);
+  EmitWithoutEvent("right-click", CreateEventFromFlags(modifiers), bounds);
+}
+
+void Tray::OnMiddleClicked(const gfx::Rect& bounds, int modifiers) {
+  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+  v8::HandleScope scope(isolate);
+  EmitWithoutEvent("middle-click", CreateEventFromFlags(modifiers), bounds);
 }
 
 void Tray::OnBalloonShow() {
@@ -138,31 +146,31 @@ void Tray::OnDropText(const std::string& text) {
 void Tray::OnMouseEntered(const gfx::Point& location, int modifiers) {
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope scope(isolate);
-  EmitCustomEvent("mouse-enter", CreateEventFromFlags(modifiers), location);
+  EmitWithoutEvent("mouse-enter", CreateEventFromFlags(modifiers), location);
 }
 
 void Tray::OnMouseExited(const gfx::Point& location, int modifiers) {
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope scope(isolate);
-  EmitCustomEvent("mouse-leave", CreateEventFromFlags(modifiers), location);
+  EmitWithoutEvent("mouse-leave", CreateEventFromFlags(modifiers), location);
 }
 
 void Tray::OnMouseMoved(const gfx::Point& location, int modifiers) {
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope scope(isolate);
-  EmitCustomEvent("mouse-move", CreateEventFromFlags(modifiers), location);
+  EmitWithoutEvent("mouse-move", CreateEventFromFlags(modifiers), location);
 }
 
 void Tray::OnMouseUp(const gfx::Point& location, int modifiers) {
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope scope(isolate);
-  EmitCustomEvent("mouse-up", CreateEventFromFlags(modifiers), location);
+  EmitWithoutEvent("mouse-up", CreateEventFromFlags(modifiers), location);
 }
 
 void Tray::OnMouseDown(const gfx::Point& location, int modifiers) {
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope scope(isolate);
-  EmitCustomEvent("mouse-down", CreateEventFromFlags(modifiers), location);
+  EmitWithoutEvent("mouse-down", CreateEventFromFlags(modifiers), location);
 }
 
 void Tray::OnDragEntered() {
@@ -178,6 +186,7 @@ void Tray::OnDragEnded() {
 }
 
 void Tray::Destroy() {
+  Unpin();
   menu_.Reset();
   tray_icon_.reset();
 }
@@ -186,23 +195,34 @@ bool Tray::IsDestroyed() {
   return !tray_icon_;
 }
 
-void Tray::SetImage(gin::Handle<NativeImage> image) {
+void Tray::SetImage(v8::Isolate* isolate, v8::Local<v8::Value> image) {
   if (!CheckAlive())
     return;
-#if defined(OS_WIN)
-  tray_icon_->SetImage(image->GetHICON(GetSystemMetrics(SM_CXSMICON)));
+
+  NativeImage* native_image = nullptr;
+  if (!NativeImage::TryConvertNativeImage(isolate, image, &native_image))
+    return;
+
+#if BUILDFLAG(IS_WIN)
+  tray_icon_->SetImage(native_image->GetHICON(GetSystemMetrics(SM_CXSMICON)));
 #else
-  tray_icon_->SetImage(image->image());
+  tray_icon_->SetImage(native_image->image());
 #endif
 }
 
-void Tray::SetPressedImage(gin::Handle<NativeImage> image) {
+void Tray::SetPressedImage(v8::Isolate* isolate, v8::Local<v8::Value> image) {
   if (!CheckAlive())
     return;
-#if defined(OS_WIN)
-  tray_icon_->SetPressedImage(image->GetHICON(GetSystemMetrics(SM_CXSMICON)));
+
+  NativeImage* native_image = nullptr;
+  if (!NativeImage::TryConvertNativeImage(isolate, image, &native_image))
+    return;
+
+#if BUILDFLAG(IS_WIN)
+  tray_icon_->SetPressedImage(
+      native_image->GetHICON(GetSystemMetrics(SM_CXSMICON)));
 #else
-  tray_icon_->SetPressedImage(image->image());
+  tray_icon_->SetPressedImage(native_image->image());
 #endif
 }
 
@@ -213,11 +233,11 @@ void Tray::SetToolTip(const std::string& tool_tip) {
 }
 
 void Tray::SetTitle(const std::string& title,
-                    const base::Optional<gin_helper::Dictionary>& options,
+                    const std::optional<gin_helper::Dictionary>& options,
                     gin::Arguments* args) {
   if (!CheckAlive())
     return;
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   TrayIcon::TitleOptions title_options;
   if (options) {
     if (options->Get("fontType", &title_options.font_type)) {
@@ -245,7 +265,7 @@ void Tray::SetTitle(const std::string& title,
 std::string Tray::GetTitle() {
   if (!CheckAlive())
     return std::string();
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   return tray_icon_->GetTitle();
 #else
   return "";
@@ -255,7 +275,7 @@ std::string Tray::GetTitle() {
 void Tray::SetIgnoreDoubleClickEvents(bool ignore) {
   if (!CheckAlive())
     return;
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   tray_icon_->SetIgnoreDoubleClickEvents(ignore);
 #endif
 }
@@ -263,7 +283,7 @@ void Tray::SetIgnoreDoubleClickEvents(bool ignore) {
 bool Tray::GetIgnoreDoubleClickEvents() {
   if (!CheckAlive())
     return false;
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   return tray_icon_->GetIgnoreDoubleClickEvents();
 #else
   return false;
@@ -282,15 +302,21 @@ void Tray::DisplayBalloon(gin_helper::ErrorThrower thrower,
     return;
   }
 
-  gin::Handle<NativeImage> icon;
-  options.Get("icon", &icon);
+  v8::Local<v8::Value> icon_value;
+  NativeImage* icon = nullptr;
+  if (options.Get("icon", &icon_value) &&
+      !NativeImage::TryConvertNativeImage(thrower.isolate(), icon_value,
+                                          &icon)) {
+    return;
+  }
+
   options.Get("iconType", &balloon_options.icon_type);
   options.Get("largeIcon", &balloon_options.large_icon);
   options.Get("noSound", &balloon_options.no_sound);
   options.Get("respectQuietTime", &balloon_options.respect_quiet_time);
 
-  if (!icon.IsEmpty()) {
-#if defined(OS_WIN)
+  if (icon) {
+#if BUILDFLAG(IS_WIN)
     balloon_options.icon = icon->GetHICON(
         GetSystemMetrics(balloon_options.large_icon ? SM_CXICON : SM_CXSMICON));
 #else
@@ -333,7 +359,9 @@ void Tray::PopUpContextMenu(gin::Arguments* args) {
       }
     }
   }
-  tray_icon_->PopUpContextMenu(pos, menu.IsEmpty() ? nullptr : menu->model());
+
+  tray_icon_->PopUpContextMenu(
+      pos, menu.IsEmpty() ? nullptr : menu->model()->GetWeakPtr());
 }
 
 void Tray::CloseContextMenu() {
@@ -367,7 +395,6 @@ gfx::Rect Tray::GetBounds() {
 bool Tray::CheckAlive() {
   if (!tray_icon_) {
     v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
-    v8::Locker locker(isolate);
     v8::HandleScope scope(isolate);
     gin_helper::ErrorThrower(isolate).ThrowError("Tray is destroyed");
     return false;
@@ -376,10 +403,9 @@ bool Tray::CheckAlive() {
 }
 
 // static
-v8::Local<v8::ObjectTemplate> Tray::FillObjectTemplate(
-    v8::Isolate* isolate,
-    v8::Local<v8::ObjectTemplate> templ) {
-  return gin::ObjectTemplateBuilder(isolate, "Tray", templ)
+void Tray::FillObjectTemplate(v8::Isolate* isolate,
+                              v8::Local<v8::ObjectTemplate> templ) {
+  gin::ObjectTemplateBuilder(isolate, GetClassName(), templ)
       .SetMethod("destroy", &Tray::Destroy)
       .SetMethod("isDestroyed", &Tray::IsDestroyed)
       .SetMethod("setImage", &Tray::SetImage)
@@ -401,9 +427,11 @@ v8::Local<v8::ObjectTemplate> Tray::FillObjectTemplate(
       .Build();
 }
 
-}  // namespace api
+const char* Tray::GetTypeName() {
+  return GetClassName();
+}
 
-}  // namespace electron
+}  // namespace electron::api
 
 namespace {
 
@@ -421,4 +449,4 @@ void Initialize(v8::Local<v8::Object> exports,
 
 }  // namespace
 
-NODE_LINKED_MODULE_CONTEXT_AWARE(electron_browser_tray, Initialize)
+NODE_LINKED_BINDING_CONTEXT_AWARE(electron_browser_tray, Initialize)

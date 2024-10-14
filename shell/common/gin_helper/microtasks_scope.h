@@ -2,13 +2,13 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_COMMON_GIN_HELPER_MICROTASKS_SCOPE_H_
-#define SHELL_COMMON_GIN_HELPER_MICROTASKS_SCOPE_H_
+#ifndef ELECTRON_SHELL_COMMON_GIN_HELPER_MICROTASKS_SCOPE_H_
+#define ELECTRON_SHELL_COMMON_GIN_HELPER_MICROTASKS_SCOPE_H_
 
-#include <memory>
+#include <optional>
 
-#include "base/macros.h"
-#include "v8/include/v8.h"
+#include "v8/include/v8-forward.h"
+#include "v8/include/v8-microtask-queue.h"
 
 namespace gin_helper {
 
@@ -16,16 +16,20 @@ namespace gin_helper {
 // In the render process creates a v8::MicrotasksScope.
 class MicrotasksScope {
  public:
-  explicit MicrotasksScope(v8::Isolate* isolate,
-                           bool ignore_browser_checkpoint = false);
+  MicrotasksScope(v8::Isolate* isolate,
+                  v8::MicrotaskQueue* microtask_queue,
+                  bool ignore_browser_checkpoint,
+                  v8::MicrotasksScope::Type scope_type);
   ~MicrotasksScope();
 
- private:
-  std::unique_ptr<v8::MicrotasksScope> v8_microtasks_scope_;
+  // disable copy
+  MicrotasksScope(const MicrotasksScope&) = delete;
+  MicrotasksScope& operator=(const MicrotasksScope&) = delete;
 
-  DISALLOW_COPY_AND_ASSIGN(MicrotasksScope);
+ private:
+  std::optional<v8::MicrotasksScope> v8_microtasks_scope_;
 };
 
 }  // namespace gin_helper
 
-#endif  // SHELL_COMMON_GIN_HELPER_MICROTASKS_SCOPE_H_
+#endif  // ELECTRON_SHELL_COMMON_GIN_HELPER_MICROTASKS_SCOPE_H_

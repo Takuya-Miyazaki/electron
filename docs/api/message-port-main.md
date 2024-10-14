@@ -14,7 +14,10 @@ channel messaging.
 
 ## Class: MessagePortMain
 
-Process: [Main](../glossary.md#main-process)
+> Port interface for channel messaging in the main process.
+
+Process: [Main](../glossary.md#main-process)<br />
+_This class is not exported from the `'electron'` module. It is only available as a return value of other methods in the Electron API._
 
 ### Instance Methods
 
@@ -53,3 +56,4 @@ Emitted when the remote end of a MessagePortMain object becomes disconnected.
 
 [`MessagePort`]: https://developer.mozilla.org/en-US/docs/Web/API/MessagePort
 [Channel Messaging API]: https://developer.mozilla.org/en-US/docs/Web/API/Channel_Messaging_API
+[event-emitter]: https://nodejs.org/api/events.html#events_class_eventemitter

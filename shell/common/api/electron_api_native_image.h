@@ -2,20 +2,21 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_COMMON_API_ELECTRON_API_NATIVE_IMAGE_H_
-#define SHELL_COMMON_API_ELECTRON_API_NATIVE_IMAGE_H_
+#ifndef ELECTRON_SHELL_COMMON_API_ELECTRON_API_NATIVE_IMAGE_H_
+#define ELECTRON_SHELL_COMMON_API_ELECTRON_API_NATIVE_IMAGE_H_
 
-#include <map>
 #include <string>
 #include <vector>
 
+#include "base/containers/flat_map.h"
+#include "base/containers/span.h"
+#include "base/memory/raw_ptr.h"
 #include "base/values.h"
-#include "gin/handle.h"
 #include "gin/wrappable.h"
-#include "shell/common/gin_helper/error_thrower.h"
 #include "ui/gfx/image/image.h"
+#include "ui/gfx/image/image_skia_rep.h"
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 #include "base/files/file_path.h"
 #include "base/win/scoped_gdi_object.h"
 #endif
@@ -24,36 +25,47 @@ class GURL;
 
 namespace base {
 class FilePath;
-}
+}  // namespace base
 
 namespace gfx {
 class Rect;
 class Size;
 }  // namespace gfx
 
-namespace gin_helper {
-class Dictionary;
-}
-
 namespace gin {
 class Arguments;
-}
 
-namespace electron {
+template <typename T>
+class Handle;
+}  // namespace gin
 
-namespace api {
+namespace gin_helper {
+class Dictionary;
+class ErrorThrower;
+}  // namespace gin_helper
 
-class NativeImage : public gin::Wrappable<NativeImage> {
+namespace electron::api {
+
+class NativeImage final : public gin::Wrappable<NativeImage> {
  public:
+  NativeImage(v8::Isolate* isolate, const gfx::Image& image);
+#if BUILDFLAG(IS_WIN)
+  NativeImage(v8::Isolate* isolate, const base::FilePath& hicon_path);
+#endif
+  ~NativeImage() override;
+
+  // disable copy
+  NativeImage(const NativeImage&) = delete;
+  NativeImage& operator=(const NativeImage&) = delete;
+
   static gin::Handle<NativeImage> CreateEmpty(v8::Isolate* isolate);
   static gin::Handle<NativeImage> Create(v8::Isolate* isolate,
                                          const gfx::Image& image);
   static gin::Handle<NativeImage> CreateFromPNG(v8::Isolate* isolate,
-                                                const char* buffer,
-                                                size_t length);
-  static gin::Handle<NativeImage> CreateFromJPEG(v8::Isolate* isolate,
-                                                 const char* buffer,
-                                                 size_t length);
+                                                base::span<const uint8_t> data);
+  static gin::Handle<NativeImage> CreateFromJPEG(
+      v8::Isolate* isolate,
+      base::span<const uint8_t> data);
   static gin::Handle<NativeImage> CreateFromPath(v8::Isolate* isolate,
                                                  const base::FilePath& path);
   static gin::Handle<NativeImage> CreateFromBitmap(
@@ -68,14 +80,20 @@ class NativeImage : public gin::Wrappable<NativeImage> {
                                                     const GURL& url);
   static gin::Handle<NativeImage> CreateFromNamedImage(gin::Arguments* args,
                                                        std::string name);
-#if !defined(OS_LINUX)
+#if !BUILDFLAG(IS_LINUX)
   static v8::Local<v8::Promise> CreateThumbnailFromPath(
       v8::Isolate* isolate,
       const base::FilePath& path,
       const gfx::Size& size);
 #endif
 
-  static v8::Local<v8::FunctionTemplate> GetConstructor(v8::Isolate* isolate);
+  enum class OnConvertError { kThrow, kWarn };
+
+  static bool TryConvertNativeImage(
+      v8::Isolate* isolate,
+      v8::Local<v8::Value> image,
+      NativeImage** native_image,
+      OnConvertError on_error = OnConvertError::kThrow);
 
   // gin::Wrappable
   static gin::WrapperInfo kWrapperInfo;
@@ -83,18 +101,11 @@ class NativeImage : public gin::Wrappable<NativeImage> {
       v8::Isolate* isolate) override;
   const char* GetTypeName() override;
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
   HICON GetHICON(int size);
 #endif
 
   const gfx::Image& image() const { return image_; }
-
- protected:
-  NativeImage(v8::Isolate* isolate, const gfx::Image& image);
-#if defined(OS_WIN)
-  NativeImage(v8::Isolate* isolate, const base::FilePath& hicon_path);
-#endif
-  ~NativeImage() override;
 
  private:
   v8::Local<v8::Value> ToPNG(gin::Arguments* args);
@@ -104,47 +115,34 @@ class NativeImage : public gin::Wrappable<NativeImage> {
   v8::Local<v8::Value> GetBitmap(gin::Arguments* args);
   v8::Local<v8::Value> GetNativeHandle(gin_helper::ErrorThrower thrower);
   gin::Handle<NativeImage> Resize(gin::Arguments* args,
-                                  base::DictionaryValue options);
+                                  base::Value::Dict options);
   gin::Handle<NativeImage> Crop(v8::Isolate* isolate, const gfx::Rect& rect);
   std::string ToDataURL(gin::Arguments* args);
   bool IsEmpty();
-  gfx::Size GetSize(const base::Optional<float> scale_factor);
-  float GetAspectRatio(const base::Optional<float> scale_factor);
+  gfx::Size GetSize(const std::optional<float> scale_factor);
+  float GetAspectRatio(const std::optional<float> scale_factor);
   void AddRepresentation(const gin_helper::Dictionary& options);
+
+  void UpdateExternalAllocatedMemoryUsage();
 
   // Mark the image as template image.
   void SetTemplateImage(bool setAsTemplate);
   // Determine if the image is a template image.
   bool IsTemplateImage();
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
   base::FilePath hicon_path_;
-  std::map<int, base::win::ScopedHICON> hicons_;
+
+  // size -> hicon
+  base::flat_map<int, base::win::ScopedHICON> hicons_;
 #endif
 
   gfx::Image image_;
 
-  v8::Isolate* isolate_;
-
-  DISALLOW_COPY_AND_ASSIGN(NativeImage);
+  raw_ptr<v8::Isolate> isolate_;
+  int32_t memory_usage_ = 0;
 };
 
-}  // namespace api
+}  // namespace electron::api
 
-}  // namespace electron
-
-namespace gin {
-
-// A custom converter that allows converting path to NativeImage.
-template <>
-struct Converter<electron::api::NativeImage*> {
-  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
-                                   electron::api::NativeImage* val);
-  static bool FromV8(v8::Isolate* isolate,
-                     v8::Local<v8::Value> val,
-                     electron::api::NativeImage** out);
-};
-
-}  // namespace gin
-
-#endif  // SHELL_COMMON_API_ELECTRON_API_NATIVE_IMAGE_H_
+#endif  // ELECTRON_SHELL_COMMON_API_ELECTRON_API_NATIVE_IMAGE_H_

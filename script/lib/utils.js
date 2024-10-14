@@ -1,15 +1,16 @@
+const chalk = require('chalk');
 const { GitProcess } = require('dugite');
-const fs = require('fs');
-const path = require('path');
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const ELECTRON_DIR = path.resolve(__dirname, '..', '..');
 const SRC_DIR = path.resolve(ELECTRON_DIR, '..');
 
-const RELEASE_BRANCH_PATTERN = /(\d)+-(?:(?:[0-9]+-x$)|(?:x+-y$))/;
-
-require('colors');
-const pass = '✓'.green;
-const fail = '✗'.red;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const pass = chalk.green('✓');
+const fail = chalk.red('✗');
 
 function getElectronExec () {
   const OUT_DIR = getOutDir();
@@ -72,8 +73,12 @@ async function handleGitCall (args, gitDir) {
 }
 
 async function getCurrentBranch (gitDir) {
+  const RELEASE_BRANCH_PATTERN = /^\d+-x-y$/;
+  const MAIN_BRANCH_PATTERN = /^main$/;
+  const ORIGIN_MAIN_BRANCH_PATTERN = /^origin\/main$/;
+
   let branch = await handleGitCall(['rev-parse', '--abbrev-ref', 'HEAD'], gitDir);
-  if (branch !== 'master' && !RELEASE_BRANCH_PATTERN.test(branch)) {
+  if (!MAIN_BRANCH_PATTERN.test(branch) && !RELEASE_BRANCH_PATTERN.test(branch)) {
     const lastCommit = await handleGitCall(['rev-parse', 'HEAD'], gitDir);
     const branches = (await handleGitCall([
       'branch',
@@ -82,7 +87,7 @@ async function getCurrentBranch (gitDir) {
       '--remote'
     ], gitDir)).split('\n');
 
-    branch = branches.filter(b => b.trim() === 'master' || b.trim() === 'origin/master' || RELEASE_BRANCH_PATTERN.test(b.trim()))[0];
+    branch = branches.find(b => MAIN_BRANCH_PATTERN.test(b.trim()) || ORIGIN_MAIN_BRANCH_PATTERN.test(b.trim()) || RELEASE_BRANCH_PATTERN.test(b.trim()));
     if (!branch) {
       console.log(`${fail} no release branch exists for this ref`);
       process.exit(1);
@@ -92,11 +97,56 @@ async function getCurrentBranch (gitDir) {
   return branch.trim();
 }
 
+function chunkFilenames (filenames, offset = 0) {
+  // Windows has a max command line length of 2047 characters, so we can't
+  // provide too many filenames without going over that. To work around that,
+  // chunk up a list of filenames such that it won't go over that limit when
+  // used as args. Other platforms may have higher limits, but 4095 might be
+  // the limit on Linux systems according to `termios(3)`, so cap it there.
+  const MAX_FILENAME_ARGS_LENGTH =
+    (os.platform() === 'win32' ? 2047 : 4095) - offset;
+
+  return filenames.reduce(
+    (chunkedFilenames, filename) => {
+      const currChunk = chunkedFilenames[chunkedFilenames.length - 1];
+      const currChunkLength = currChunk.reduce(
+        (totalLength, _filename) => totalLength + _filename.length + 1,
+        0
+      );
+      if (currChunkLength + filename.length + 1 > MAX_FILENAME_ARGS_LENGTH) {
+        chunkedFilenames.push([filename]);
+      } else {
+        currChunk.push(filename);
+      }
+      return chunkedFilenames;
+    },
+    [[]]
+  );
+}
+
+/**
+ * @param {string} top
+ * @param {(filename: string) => boolean} test
+ * @returns {Promise<string[]>}
+*/
+async function findMatchingFiles (top, test) {
+  return fs.promises.readdir(top, { encoding: 'utf8', recursive: true })
+    .then(files => {
+      return files
+        .filter(name => path.basename(name) !== '.bin')
+        .filter(name => test(name))
+        .map(name => path.join(top, name));
+    });
+}
+
 module.exports = {
+  chunkFilenames,
+  findMatchingFiles,
   getCurrentBranch,
   getElectronExec,
   getOutDir,
   getAbsoluteElectronExec,
+  handleGitCall,
   ELECTRON_DIR,
   SRC_DIR
 };

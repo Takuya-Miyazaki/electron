@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "gin/handle.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/object_template_builder.h"
 #include "shell/common/gin_helper/promise.h"
@@ -16,13 +17,31 @@
 namespace gin {
 
 template <>
+struct Converter<in_app_purchase::PaymentDiscount> {
+  static v8::Local<v8::Value> ToV8(
+      v8::Isolate* isolate,
+      const in_app_purchase::PaymentDiscount& paymentDiscount) {
+    auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
+    dict.Set("identifier", paymentDiscount.identifier);
+    dict.Set("keyIdentifier", paymentDiscount.keyIdentifier);
+    dict.Set("nonce", paymentDiscount.nonce);
+    dict.Set("signature", paymentDiscount.signature);
+    dict.Set("timestamp", paymentDiscount.timestamp);
+    return dict.GetHandle();
+  }
+};
+
+template <>
 struct Converter<in_app_purchase::Payment> {
   static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
                                    const in_app_purchase::Payment& payment) {
-    gin_helper::Dictionary dict = gin::Dictionary::CreateEmpty(isolate);
-    dict.SetHidden("simple", true);
+    auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
     dict.Set("productIdentifier", payment.productIdentifier);
     dict.Set("quantity", payment.quantity);
+    dict.Set("applicationUsername", payment.applicationUsername);
+    if (payment.paymentDiscount.has_value()) {
+      dict.Set("paymentDiscount", payment.paymentDiscount.value());
+    }
     return dict.GetHandle();
   }
 };
@@ -31,8 +50,7 @@ template <>
 struct Converter<in_app_purchase::Transaction> {
   static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
                                    const in_app_purchase::Transaction& val) {
-    gin_helper::Dictionary dict = gin::Dictionary::CreateEmpty(isolate);
-    dict.SetHidden("simple", true);
+    auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
     dict.Set("transactionIdentifier", val.transactionIdentifier);
     dict.Set("transactionDate", val.transactionDate);
     dict.Set("originalTransactionIdentifier",
@@ -46,26 +64,63 @@ struct Converter<in_app_purchase::Transaction> {
 };
 
 template <>
+struct Converter<in_app_purchase::ProductSubscriptionPeriod> {
+  static v8::Local<v8::Value> ToV8(
+      v8::Isolate* isolate,
+      const in_app_purchase::ProductSubscriptionPeriod&
+          productSubscriptionPeriod) {
+    auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
+    dict.Set("numberOfUnits", productSubscriptionPeriod.numberOfUnits);
+    dict.Set("unit", productSubscriptionPeriod.unit);
+    return dict.GetHandle();
+  }
+};
+
+template <>
+struct Converter<in_app_purchase::ProductDiscount> {
+  static v8::Local<v8::Value> ToV8(
+      v8::Isolate* isolate,
+      const in_app_purchase::ProductDiscount& productDiscount) {
+    auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
+    dict.Set("identifier", productDiscount.identifier);
+    dict.Set("type", productDiscount.type);
+    dict.Set("price", productDiscount.price);
+    dict.Set("priceLocale", productDiscount.priceLocale);
+    dict.Set("paymentMode", productDiscount.paymentMode);
+    dict.Set("numberOfPeriods", productDiscount.numberOfPeriods);
+    if (productDiscount.subscriptionPeriod.has_value()) {
+      dict.Set("subscriptionPeriod",
+               productDiscount.subscriptionPeriod.value());
+    }
+    return dict.GetHandle();
+  }
+};
+
+template <>
 struct Converter<in_app_purchase::Product> {
   static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
                                    const in_app_purchase::Product& val) {
-    gin_helper::Dictionary dict = gin::Dictionary::CreateEmpty(isolate);
-    dict.SetHidden("simple", true);
+    auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
     dict.Set("productIdentifier", val.productIdentifier);
     dict.Set("localizedDescription", val.localizedDescription);
     dict.Set("localizedTitle", val.localizedTitle);
-    dict.Set("contentVersion", val.localizedTitle);
-    dict.Set("contentLengths", val.contentLengths);
 
     // Pricing Information
     dict.Set("price", val.price);
     dict.Set("formattedPrice", val.formattedPrice);
-
-    // Currency Information
     dict.Set("currencyCode", val.currencyCode);
-
+    if (val.introductoryPrice.has_value()) {
+      dict.Set("introductoryPrice", val.introductoryPrice.value());
+    }
+    dict.Set("discounts", val.discounts);
+    dict.Set("subscriptionGroupIdentifier", val.subscriptionGroupIdentifier);
+    if (val.subscriptionPeriod.has_value()) {
+      dict.Set("subscriptionPeriod", val.subscriptionPeriod.value());
+    }
     // Downloadable Content Information
     dict.Set("isDownloadable", val.isDownloadable);
+    dict.Set("downloadContentVersion", val.downloadContentVersion);
+    dict.Set("downloadContentLengths", val.downloadContentLengths);
 
     return dict.GetHandle();
   }
@@ -73,13 +128,11 @@ struct Converter<in_app_purchase::Product> {
 
 }  // namespace gin
 
-namespace electron {
-
-namespace api {
+namespace electron::api {
 
 gin::WrapperInfo InAppPurchase::kWrapperInfo = {gin::kEmbedderNativeGin};
 
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
 // static
 gin::Handle<InAppPurchase> InAppPurchase::Create(v8::Isolate* isolate) {
   return gin::CreateHandle(isolate, new InAppPurchase());
@@ -105,9 +158,9 @@ const char* InAppPurchase::GetTypeName() {
   return "InAppPurchase";
 }
 
-InAppPurchase::InAppPurchase() {}
+InAppPurchase::InAppPurchase() = default;
 
-InAppPurchase::~InAppPurchase() {}
+InAppPurchase::~InAppPurchase() = default;
 
 v8::Local<v8::Promise> InAppPurchase::PurchaseProduct(
     const std::string& product_id,
@@ -118,9 +171,11 @@ v8::Local<v8::Promise> InAppPurchase::PurchaseProduct(
 
   int quantity = 1;
   args->GetNext(&quantity);
+  std::string username = "";
+  args->GetNext(&username);
 
   in_app_purchase::PurchaseProduct(
-      product_id, quantity,
+      product_id, quantity, username,
       base::BindOnce(gin_helper::Promise<bool>::ResolvePromise,
                      std::move(promise)));
 
@@ -149,9 +204,7 @@ void InAppPurchase::OnTransactionsUpdated(
 }
 #endif
 
-}  // namespace api
-
-}  // namespace electron
+}  // namespace electron::api
 
 namespace {
 
@@ -161,7 +214,7 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   v8::Isolate* isolate = context->GetIsolate();
   gin_helper::Dictionary dict(isolate, exports);
   dict.Set("inAppPurchase", InAppPurchase::Create(isolate));
@@ -170,4 +223,4 @@ void Initialize(v8::Local<v8::Object> exports,
 
 }  // namespace
 
-NODE_LINKED_MODULE_CONTEXT_AWARE(electron_browser_in_app_purchase, Initialize)
+NODE_LINKED_BINDING_CONTEXT_AWARE(electron_browser_in_app_purchase, Initialize)

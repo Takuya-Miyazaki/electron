@@ -7,59 +7,67 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <utility>
 
-#if defined(OS_LINUX)
-#include <glib.h>  // for g_setenv()
-#endif
-
+#include "base/apple/bundle_locations.h"
+#include "base/base_switches.h"
 #include "base/command_line.h"
 #include "base/debug/stack_trace.h"
 #include "base/environment.h"
 #include "base/files/file_util.h"
 #include "base/logging.h"
-#include "base/mac/bundle_locations.h"
 #include "base/path_service.h"
-#include "base/strings/string_split.h"
 #include "chrome/common/chrome_paths.h"
+#include "chrome/common/chrome_switches.h"
 #include "components/content_settings/core/common/content_settings_pattern.h"
+#include "content/public/app/initialize_mojo_core.h"
 #include "content/public/common/content_switches.h"
 #include "electron/buildflags/buildflags.h"
+#include "electron/fuses.h"
+#include "electron/mas.h"
 #include "extensions/common/constants.h"
 #include "ipc/ipc_buildflags.h"
 #include "sandbox/policy/switches.h"
-#include "services/service_manager/embedder/switches.h"
 #include "services/tracing/public/cpp/stack_sampling/tracing_sampler_profiler.h"
+#include "shell/app/command_line_args.h"
 #include "shell/app/electron_content_client.h"
 #include "shell/browser/electron_browser_client.h"
 #include "shell/browser/electron_gpu_client.h"
 #include "shell/browser/feature_list.h"
 #include "shell/browser/relauncher.h"
+#include "shell/common/application_info.h"
 #include "shell/common/electron_paths.h"
+#include "shell/common/logging.h"
 #include "shell/common/options_switches.h"
+#include "shell/common/platform_util.h"
+#include "shell/common/process_util.h"
+#include "shell/common/thread_restrictions.h"
 #include "shell/renderer/electron_renderer_client.h"
 #include "shell/renderer/electron_sandboxed_renderer_client.h"
 #include "shell/utility/electron_content_utility_client.h"
-#include "ui/base/l10n/l10n_util.h"
+#include "third_party/abseil-cpp/absl/types/variant.h"
 #include "ui/base/resource/resource_bundle.h"
 #include "ui/base/ui_base_switches.h"
 
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
 #include "shell/app/electron_main_delegate_mac.h"
 #endif
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 #include "base/win/win_util.h"
 #include "chrome/child/v8_crashpad_support_win.h"
 #endif
 
-#if defined(OS_LINUX)
-#include "components/crash/core/app/breakpad_linux.h"
+#if BUILDFLAG(IS_LINUX)
+#include "base/nix/xdg_util.h"
 #include "v8/include/v8-wasm-trap-handler-posix.h"
 #include "v8/include/v8.h"
 #endif
 
-#if !defined(MAS_BUILD)
-#include "components/crash/core/app/crashpad.h"  // nogncheck
+#if !IS_MAS_BUILD()
+#include "components/crash/core/app/crash_switches.h"  // nogncheck
+#include "components/crash/core/app/crashpad.h"        // nogncheck
 #include "components/crash/core/common/crash_key.h"
 #include "components/crash/core/common/crash_keys.h"
 #include "shell/app/electron_crash_reporter_client.h"
@@ -71,38 +79,30 @@ namespace electron {
 
 namespace {
 
-const char* kRelauncherProcess = "relauncher";
+const char kRelauncherProcess[] = "relauncher";
 
-bool IsBrowserProcess(base::CommandLine* cmd) {
-  std::string process_type = cmd->GetSwitchValueASCII(::switches::kProcessType);
-  return process_type.empty();
-}
-
-bool IsSandboxEnabled(base::CommandLine* command_line) {
-  return command_line->HasSwitch(switches::kEnableSandbox) ||
-         !command_line->HasSwitch(sandbox::policy::switches::kNoSandbox);
-}
+constexpr std::string_view kElectronDisableSandbox{"ELECTRON_DISABLE_SANDBOX"};
+constexpr std::string_view kElectronEnableStackDumping{
+    "ELECTRON_ENABLE_STACK_DUMPING"};
 
 // Returns true if this subprocess type needs the ResourceBundle initialized
 // and resources loaded.
 bool SubprocessNeedsResourceBundle(const std::string& process_type) {
   return
-#if defined(OS_LINUX)
+#if BUILDFLAG(IS_LINUX)
       // The zygote process opens the resources for the renderers.
-      process_type == service_manager::switches::kZygoteProcess ||
+      process_type == ::switches::kZygoteProcess ||
 #endif
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
       // Mac needs them too for scrollbar related images and for sandbox
       // profiles.
-      process_type == ::switches::kPpapiPluginProcess ||
-      process_type == ::switches::kPpapiBrokerProcess ||
       process_type == ::switches::kGpuProcess ||
 #endif
       process_type == ::switches::kRendererProcess ||
       process_type == ::switches::kUtilityProcess;
 }
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
 void InvalidParameterHandler(const wchar_t*,
                              const wchar_t*,
                              const wchar_t*,
@@ -112,34 +112,93 @@ void InvalidParameterHandler(const wchar_t*,
 }
 #endif
 
-}  // namespace
-
 // TODO(nornagon): move path provider overriding to its own file in
 // shell/common
-namespace electron {
-
-bool GetDefaultCrashDumpsPath(base::FilePath* path) {
+bool ElectronPathProvider(int key, base::FilePath* result) {
+  bool create_dir = false;
   base::FilePath cur;
-  if (!base::PathService::Get(DIR_USER_DATA, &cur))
-    return false;
-#if defined(OS_MAC) || defined(OS_WIN)
-  cur = cur.Append(FILE_PATH_LITERAL("Crashpad"));
+  switch (key) {
+    case chrome::DIR_USER_DATA:
+      if (!base::PathService::Get(DIR_APP_DATA, &cur))
+        return false;
+      cur = cur.Append(base::FilePath::FromUTF8Unsafe(
+          GetPossiblyOverriddenApplicationName()));
+      create_dir = true;
+      break;
+    case DIR_CRASH_DUMPS:
+      if (!base::PathService::Get(chrome::DIR_USER_DATA, &cur))
+        return false;
+      cur = cur.Append(FILE_PATH_LITERAL("Crashpad"));
+      create_dir = true;
+      break;
+    case chrome::DIR_APP_DICTIONARIES:
+      // TODO(nornagon): can we just default to using Chrome's logic here?
+      if (!base::PathService::Get(DIR_SESSION_DATA, &cur))
+        return false;
+      cur = cur.Append(base::FilePath::FromUTF8Unsafe("Dictionaries"));
+      create_dir = true;
+      break;
+    case DIR_SESSION_DATA:
+      // By default and for backward, equivalent to DIR_USER_DATA.
+      return base::PathService::Get(chrome::DIR_USER_DATA, result);
+    case DIR_USER_CACHE: {
+#if BUILDFLAG(IS_POSIX)
+      int parent_key = base::DIR_CACHE;
 #else
-  cur = cur.Append(FILE_PATH_LITERAL("Crash Reports"));
+      // On Windows, there's no OS-level centralized location for caches, so
+      // store the cache in the app data directory.
+      int parent_key = base::DIR_ROAMING_APP_DATA;
 #endif
-  // TODO(bauerb): http://crbug.com/259796
-  base::ThreadRestrictions::ScopedAllowIO allow_io;
-  if (!base::PathExists(cur) && !base::CreateDirectory(cur))
-    return false;
-  *path = cur;
-  return true;
-}
-
-bool ElectronPathProvider(int key, base::FilePath* path) {
-  if (key == DIR_CRASH_DUMPS) {
-    return GetDefaultCrashDumpsPath(path);
+      if (!base::PathService::Get(parent_key, &cur))
+        return false;
+      cur = cur.Append(base::FilePath::FromUTF8Unsafe(
+          GetPossiblyOverriddenApplicationName()));
+      create_dir = true;
+      break;
+    }
+#if BUILDFLAG(IS_LINUX)
+    case DIR_APP_DATA: {
+      auto env = base::Environment::Create();
+      cur = base::nix::GetXDGDirectory(
+          env.get(), base::nix::kXdgConfigHomeEnvVar, base::nix::kDotConfigDir);
+      break;
+    }
+#endif
+#if BUILDFLAG(IS_WIN)
+    case DIR_RECENT:
+      if (!platform_util::GetFolderPath(DIR_RECENT, &cur))
+        return false;
+      create_dir = true;
+      break;
+#endif
+    case DIR_APP_LOGS:
+#if BUILDFLAG(IS_MAC)
+      if (!base::PathService::Get(base::DIR_HOME, &cur))
+        return false;
+      cur = cur.Append(FILE_PATH_LITERAL("Library"));
+      cur = cur.Append(FILE_PATH_LITERAL("Logs"));
+      cur = cur.Append(base::FilePath::FromUTF8Unsafe(
+          GetPossiblyOverriddenApplicationName()));
+#else
+      if (!base::PathService::Get(chrome::DIR_USER_DATA, &cur))
+        return false;
+      cur = cur.Append(base::FilePath::FromUTF8Unsafe("logs"));
+#endif
+      create_dir = true;
+      break;
+    default:
+      return false;
   }
-  return false;
+
+  // TODO(bauerb): http://crbug.com/259796
+  ScopedAllowBlockingForElectron allow_blocking;
+  if (create_dir && !base::PathExists(cur) && !base::CreateDirectory(cur)) {
+    return false;
+  }
+
+  *result = cur;
+
+  return true;
 }
 
 void RegisterPathProvider() {
@@ -147,28 +206,27 @@ void RegisterPathProvider() {
                                       PATH_END);
 }
 
-}  // namespace electron
+}  // namespace
 
-void LoadResourceBundle(const std::string& locale) {
+std::string LoadResourceBundle(const std::string& locale) {
   const bool initialized = ui::ResourceBundle::HasSharedInstance();
-  if (initialized)
-    ui::ResourceBundle::CleanupSharedInstance();
+  DCHECK(!initialized);
 
   // Load other resource files.
   base::FilePath pak_dir;
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   pak_dir =
-      base::mac::FrameworkBundlePath().Append(FILE_PATH_LITERAL("Resources"));
+      base::apple::FrameworkBundlePath().Append(FILE_PATH_LITERAL("Resources"));
 #else
   base::PathService::Get(base::DIR_MODULE, &pak_dir);
 #endif
 
-  ui::ResourceBundle::InitSharedInstanceWithLocale(
+  std::string loaded_locale = ui::ResourceBundle::InitSharedInstanceWithLocale(
       locale, nullptr, ui::ResourceBundle::LOAD_COMMON_RESOURCES);
   ui::ResourceBundle& bundle = ui::ResourceBundle::GetSharedInstance();
-  bundle.ReloadLocaleResources(locale);
   bundle.AddDataPackFromPath(pak_dir.Append(FILE_PATH_LITERAL("resources.pak")),
-                             ui::SCALE_FACTOR_NONE);
+                             ui::kScaleFactorNone);
+  return loaded_locale;
 }
 
 ElectronMainDelegate::ElectronMainDelegate() = default;
@@ -178,56 +236,28 @@ ElectronMainDelegate::~ElectronMainDelegate() = default;
 const char* const ElectronMainDelegate::kNonWildcardDomainNonPortSchemes[] = {
     extensions::kExtensionScheme};
 const size_t ElectronMainDelegate::kNonWildcardDomainNonPortSchemesSize =
-    base::size(kNonWildcardDomainNonPortSchemes);
+    std::size(kNonWildcardDomainNonPortSchemes);
 
-bool ElectronMainDelegate::BasicStartupComplete(int* exit_code) {
+std::optional<int> ElectronMainDelegate::BasicStartupComplete() {
   auto* command_line = base::CommandLine::ForCurrentProcess();
 
-  logging::LoggingSettings settings;
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
   v8_crashpad_support::SetUp();
 
   // On Windows the terminal returns immediately, so we add a new line to
   // prevent output in the same line as the prompt.
-  if (IsBrowserProcess(command_line))
+  if (IsBrowserProcess())
     std::wcout << std::endl;
-#if defined(DEBUG)
-  // Print logging to debug.log on Windows
-  settings.logging_dest = logging::LOG_TO_ALL;
-  base::FilePath log_filename;
-  base::PathService::Get(base::DIR_EXE, &log_filename);
-  log_filename = log_filename.AppendASCII("debug.log");
-  settings.log_file_path = log_filename.value().c_str();
-  settings.lock_log = logging::LOCK_LOG_FILE;
-  settings.delete_old = logging::DELETE_OLD_LOG_FILE;
-#else
-  settings.logging_dest =
-      logging::LOG_TO_SYSTEM_DEBUG_LOG | logging::LOG_TO_STDERR;
-#endif  // defined(DEBUG)
-#else   // defined(OS_WIN)
-  settings.logging_dest =
-      logging::LOG_TO_SYSTEM_DEBUG_LOG | logging::LOG_TO_STDERR;
-#endif  // !defined(OS_WIN)
+#endif  // !BUILDFLAG(IS_WIN)
 
-  // Only enable logging when --enable-logging is specified.
   auto env = base::Environment::Create();
-  if (!command_line->HasSwitch(::switches::kEnableLogging) &&
-      !env->HasVar("ELECTRON_ENABLE_LOGGING")) {
-    settings.logging_dest = logging::LOG_NONE;
-    logging::SetMinLogLevel(logging::LOG_NUM_SEVERITIES);
-  }
 
-  logging::InitLogging(settings);
-
-  // Logging with pid and timestamp.
-  logging::SetLogItems(true, false, true, false);
-
-  // Enable convient stack printing. This is enabled by default in non-official
-  // builds.
-  if (env->HasVar("ELECTRON_ENABLE_STACK_DUMPING"))
+  // Enable convenient stack printing. This is enabled by default in
+  // non-official builds.
+  if (env->HasVar(kElectronEnableStackDumping))
     base::debug::EnableInProcessStackDumping();
 
-  if (env->HasVar("ELECTRON_DISABLE_SANDBOX"))
+  if (env->HasVar(kElectronDisableSandbox))
     command_line->AppendSwitch(sandbox::policy::switches::kNoSandbox);
 
   tracing_sampler_profiler_ =
@@ -241,24 +271,24 @@ bool ElectronMainDelegate::BasicStartupComplete(int* exit_code) {
       kNonWildcardDomainNonPortSchemes, kNonWildcardDomainNonPortSchemesSize);
 #endif
 
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   OverrideChildProcessPath();
   OverrideFrameworkBundlePath();
   SetUpBundleOverrides();
 #endif
 
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
   // Ignore invalid parameter errors.
   _set_invalid_parameter_handler(InvalidParameterHandler);
   // Disable the ActiveVerifier, which is used by Chrome to track possible
   // bugs, but no use in Electron.
   base::win::DisableHandleVerifier();
 
-  if (IsBrowserProcess(command_line))
+  if (IsBrowserProcess())
     base::win::PinUser32();
 #endif
 
-#if defined(OS_LINUX)
+#if BUILDFLAG(IS_LINUX)
   // Check for --no-sandbox parameter when running as root.
   if (getuid() == 0 && IsSandboxEnabled(command_line))
     LOG(FATAL) << "Running as root without --"
@@ -266,7 +296,7 @@ bool ElectronMainDelegate::BasicStartupComplete(int* exit_code) {
                << " is not supported. See https://crbug.com/638180.";
 #endif
 
-#if defined(MAS_BUILD)
+#if IS_MAS_BUILD()
   // In MAS build we are using --disable-remote-core-animation.
   //
   // According to ccameron:
@@ -281,49 +311,34 @@ bool ElectronMainDelegate::BasicStartupComplete(int* exit_code) {
       ::switches::kDisableGpuMemoryBufferCompositorResources);
 #endif
 
-  content_client_ = std::make_unique<ElectronContentClient>();
-  SetContentClient(content_client_.get());
-
-  return false;
-}
-
-void ElectronMainDelegate::PostEarlyInitialization(bool is_running_tests) {
-  std::string custom_locale;
-  ui::ResourceBundle::InitSharedInstanceWithLocale(
-      custom_locale, nullptr, ui::ResourceBundle::LOAD_COMMON_RESOURCES);
-  auto* cmd_line = base::CommandLine::ForCurrentProcess();
-  if (cmd_line->HasSwitch(::switches::kLang)) {
-    const std::string locale = cmd_line->GetSwitchValueASCII(::switches::kLang);
-    const base::FilePath locale_file_path =
-        ui::ResourceBundle::GetSharedInstance().GetLocaleFilePath(locale);
-    if (!locale_file_path.empty()) {
-      custom_locale = locale;
-#if defined(OS_LINUX)
-      /* When built with USE_GLIB, libcc's GetApplicationLocaleInternal() uses
-       * glib's g_get_language_names(), which keys off of getenv("LC_ALL") */
-      g_setenv("LC_ALL", custom_locale.c_str(), TRUE);
-#endif
-    }
-  }
-
-#if defined(OS_MAC)
-  if (custom_locale.empty())
-    l10n_util::OverrideLocaleWithCocoaLocale();
-#endif
-
-  LoadResourceBundle(custom_locale);
-
-  ElectronBrowserClient::SetApplicationLocale(
-      l10n_util::GetApplicationLocale(custom_locale));
+  return std::nullopt;
 }
 
 void ElectronMainDelegate::PreSandboxStartup() {
   auto* command_line = base::CommandLine::ForCurrentProcess();
+  std::string process_type = GetProcessType();
 
-  std::string process_type =
-      command_line->GetSwitchValueASCII(::switches::kProcessType);
+  base::FilePath user_data_dir =
+      command_line->GetSwitchValuePath(::switches::kUserDataDir);
+  if (!user_data_dir.empty()) {
+    base::PathService::OverrideAndCreateIfNeeded(chrome::DIR_USER_DATA,
+                                                 user_data_dir, false, true);
+  }
 
-#if !defined(MAS_BUILD)
+#if !BUILDFLAG(IS_WIN)
+  // For windows we call InitLogging later, after the sandbox is initialized.
+  //
+  // On Linux, we force a "preinit" in the zygote (i.e. never log to a default
+  // log file), because the zygote is booted prior to JS running, so it can't
+  // know the correct user-data directory. (And, further, accessing the
+  // application name on Linux can cause glib calls that end up spawning
+  // threads, which if done before the zygote is booted, causes a CHECK().)
+  logging::InitElectronLogging(
+      *command_line,
+      /* is_preinit = */ IsBrowserProcess() || IsZygoteProcess());
+#endif
+
+#if !IS_MAS_BUILD()
   crash_reporter::InitializeCrashKeys();
 #endif
 
@@ -335,50 +350,85 @@ void ElectronMainDelegate::PreSandboxStartup() {
     LoadResourceBundle(locale);
   }
 
-#if defined(OS_WIN) || (defined(OS_MAC) && !defined(MAS_BUILD))
+#if BUILDFLAG(IS_WIN) || (BUILDFLAG(IS_MAC) && !IS_MAS_BUILD())
   // In the main process, we wait for JS to call crashReporter.start() before
   // initializing crashpad. If we're in the renderer, we want to initialize it
   // immediately at boot.
-  if (!process_type.empty()) {
+  if (!IsBrowserProcess()) {
     ElectronCrashReporterClient::Create();
     crash_reporter::InitializeCrashpad(false, process_type);
   }
 #endif
 
-#if defined(OS_LINUX)
-  if (process_type != service_manager::switches::kZygoteProcess &&
-      !process_type.empty()) {
+#if BUILDFLAG(IS_LINUX)
+  // Zygote needs to call InitCrashReporter() in RunZygote().
+  if (!IsZygoteProcess() && !IsBrowserProcess()) {
     ElectronCrashReporterClient::Create();
-    breakpad::InitCrashReporter(process_type);
+    if (command_line->HasSwitch(
+            crash_reporter::switches::kCrashpadHandlerPid)) {
+      crash_reporter::InitializeCrashpad(false, process_type);
+      crash_reporter::SetFirstChanceExceptionHandler(
+          v8::TryHandleWebAssemblyTrapPosix);
+    }
   }
 #endif
 
-#if !defined(MAS_BUILD)
+#if !IS_MAS_BUILD()
   crash_keys::SetCrashKeysFromCommandLine(*command_line);
   crash_keys::SetPlatformCrashKey();
 #endif
 
-  if (IsBrowserProcess(command_line)) {
+  if (IsBrowserProcess()) {
     // Only append arguments for browser process.
 
     // Allow file:// URIs to read other file:// URIs by default.
     command_line->AppendSwitch(::switches::kAllowFileAccessFromFiles);
 
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
     // Enable AVFoundation.
     command_line->AppendSwitch("enable-avfoundation");
 #endif
   }
 }
 
-void ElectronMainDelegate::PreCreateMainMessageLoop() {
+void ElectronMainDelegate::SandboxInitialized(const std::string& process_type) {
+#if BUILDFLAG(IS_WIN)
+  logging::InitElectronLogging(*base::CommandLine::ForCurrentProcess(),
+                               /* is_preinit = */ process_type.empty());
+#endif
+}
+
+std::optional<int> ElectronMainDelegate::PreBrowserMain() {
   // This is initialized early because the service manager reads some feature
   // flags and we need to make sure the feature list is initialized before the
   // service manager reads the features.
   InitializeFeatureList();
-#if defined(OS_MAC)
+  // Initialize mojo core as soon as we have a valid feature list
+  content::InitializeMojoCore();
+#if BUILDFLAG(IS_MAC)
   RegisterAtomCrApp();
 #endif
+#if BUILDFLAG(IS_LINUX)
+  // Set the global activation token sent as an environment variable.
+  auto env = base::Environment::Create();
+  base::nix::ExtractXdgActivationTokenFromEnv(*env);
+#endif
+  return std::nullopt;
+}
+
+std::string_view ElectronMainDelegate::GetBrowserV8SnapshotFilename() {
+  bool load_browser_process_specific_v8_snapshot =
+      IsBrowserProcess() &&
+      electron::fuses::IsLoadBrowserProcessSpecificV8SnapshotEnabled();
+  if (load_browser_process_specific_v8_snapshot) {
+    return "browser_v8_context_snapshot.bin";
+  }
+  return ContentMainDelegate::GetBrowserV8SnapshotFilename();
+}
+
+content::ContentClient* ElectronMainDelegate::CreateContentClient() {
+  content_client_ = std::make_unique<ElectronContentClient>();
+  return content_client_.get();
 }
 
 content::ContentBrowserClient*
@@ -411,24 +461,29 @@ ElectronMainDelegate::CreateContentUtilityClient() {
   return utility_client_.get();
 }
 
-int ElectronMainDelegate::RunProcess(
+absl::variant<int, content::MainFunctionParams>
+ElectronMainDelegate::RunProcess(
     const std::string& process_type,
-    const content::MainFunctionParams& main_function_params) {
+    content::MainFunctionParams main_function_params) {
   if (process_type == kRelauncherProcess)
     return relauncher::RelauncherMain(main_function_params);
   else
-    return -1;
+    return std::move(main_function_params);
 }
 
-bool ElectronMainDelegate::ShouldCreateFeatureList() {
-  return false;
+bool ElectronMainDelegate::ShouldCreateFeatureList(InvokedIn invoked_in) {
+  return absl::holds_alternative<InvokedInChildProcess>(invoked_in);
+}
+
+bool ElectronMainDelegate::ShouldInitializeMojo(InvokedIn invoked_in) {
+  return ShouldCreateFeatureList(invoked_in);
 }
 
 bool ElectronMainDelegate::ShouldLockSchemeRegistry() {
   return false;
 }
 
-#if defined(OS_LINUX)
+#if BUILDFLAG(IS_LINUX)
 void ElectronMainDelegate::ZygoteForked() {
   // Needs to be called after we have DIR_USER_DATA.  BrowserMain sets
   // this up for the browser process in a different manner.
@@ -437,11 +492,15 @@ void ElectronMainDelegate::ZygoteForked() {
       base::CommandLine::ForCurrentProcess();
   std::string process_type =
       command_line->GetSwitchValueASCII(::switches::kProcessType);
-  breakpad::InitCrashReporter(process_type);
+  if (command_line->HasSwitch(crash_reporter::switches::kCrashpadHandlerPid)) {
+    crash_reporter::InitializeCrashpad(false, process_type);
+    crash_reporter::SetFirstChanceExceptionHandler(
+        v8::TryHandleWebAssemblyTrapPosix);
+  }
 
   // Reset the command line for the newly spawned process.
   crash_keys::SetCrashKeysFromCommandLine(*command_line);
 }
-#endif  // defined(OS_LINUX)
+#endif  // BUILDFLAG(IS_LINUX)
 
 }  // namespace electron

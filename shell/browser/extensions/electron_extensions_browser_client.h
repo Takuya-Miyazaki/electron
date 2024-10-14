@@ -2,20 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_EXTENSIONS_ELECTRON_EXTENSIONS_BROWSER_CLIENT_H_
-#define SHELL_BROWSER_EXTENSIONS_ELECTRON_EXTENSIONS_BROWSER_CLIENT_H_
+#ifndef ELECTRON_SHELL_BROWSER_EXTENSIONS_ELECTRON_EXTENSIONS_BROWSER_CLIENT_H_
+#define ELECTRON_SHELL_BROWSER_EXTENSIONS_ELECTRON_EXTENSIONS_BROWSER_CLIENT_H_
 
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "base/compiler_specific.h"
-#include "base/macros.h"
-#include "build/build_config.h"
+#include "content/public/browser/frame_tree_node_id.h"
 #include "extensions/browser/extensions_browser_client.h"
 #include "extensions/browser/kiosk/kiosk_delegate.h"
-#include "mojo/public/cpp/bindings/pending_remote.h"
-#include "third_party/blink/public/mojom/loader/resource_load_info.mojom-shared.h"
+#include "services/network/public/cpp/resource_request.h"
+#include "services/network/public/mojom/fetch_api.mojom.h"
+#include "url/origin.h"
 
 class PrefService;
 
@@ -28,6 +27,13 @@ class ProcessMap;
 class ElectronComponentExtensionResourceManager;
 }  // namespace extensions
 
+namespace mojo {
+template <typename T>
+class PendingReceiver;
+template <typename T>
+class PendingRemote;
+}  // namespace mojo
+
 namespace electron {
 
 // An ExtensionsBrowserClient that supports a single content::BrowserContext
@@ -38,17 +44,34 @@ class ElectronExtensionsBrowserClient
   ElectronExtensionsBrowserClient();
   ~ElectronExtensionsBrowserClient() override;
 
+  // disable copy
+  ElectronExtensionsBrowserClient(const ElectronExtensionsBrowserClient&) =
+      delete;
+  ElectronExtensionsBrowserClient& operator=(
+      const ElectronExtensionsBrowserClient&) = delete;
+
   // ExtensionsBrowserClient overrides:
   bool IsShuttingDown() override;
   bool AreExtensionsDisabled(const base::CommandLine& command_line,
                              content::BrowserContext* context) override;
-  bool IsValidContext(content::BrowserContext* context) override;
+  bool IsValidContext(void* context) override;
   bool IsSameContext(content::BrowserContext* first,
                      content::BrowserContext* second) override;
   bool HasOffTheRecordContext(content::BrowserContext* context) override;
   content::BrowserContext* GetOffTheRecordContext(
       content::BrowserContext* context) override;
   content::BrowserContext* GetOriginalContext(
+      content::BrowserContext* context) override;
+  content::BrowserContext* GetContextRedirectedToOriginal(
+      content::BrowserContext* context,
+      bool force_guest_profile) override;
+  content::BrowserContext* GetContextOwnInstance(
+      content::BrowserContext* context,
+      bool force_guest_profile) override;
+  content::BrowserContext* GetContextForOriginalOnly(
+      content::BrowserContext* context,
+      bool force_guest_profile) override;
+  bool AreExtensionsDisabledForContext(
       content::BrowserContext* context) override;
   bool IsGuestSession(content::BrowserContext* context) const override;
   bool IsExtensionIncognitoEnabled(
@@ -66,18 +89,18 @@ class ElectronExtensionsBrowserClient
       mojo::PendingReceiver<network::mojom::URLLoader> loader,
       const base::FilePath& resource_relative_path,
       int resource_id,
-      const std::string& content_security_policy,
-      mojo::PendingRemote<network::mojom::URLLoaderClient> client,
-      bool send_cors_header) override;
+      scoped_refptr<net::HttpResponseHeaders> headers,
+      mojo::PendingRemote<network::mojom::URLLoaderClient> client) override;
   bool AllowCrossRendererResourceLoad(
-      const GURL& url,
-      blink::mojom::ResourceType resource_type,
+      const network::ResourceRequest& request,
+      network::mojom::RequestDestination destination,
       ui::PageTransition page_transition,
       int child_id,
       bool is_incognito,
       const extensions::Extension* extension,
       const extensions::ExtensionSet& extensions,
-      const extensions::ProcessMap& process_map) override;
+      const extensions::ProcessMap& process_map,
+      const GURL& upstream_url) override;
   PrefService* GetPrefServiceForContext(
       content::BrowserContext* context) override;
   void GetEarlyExtensionPrefsObservers(
@@ -86,6 +109,11 @@ class ElectronExtensionsBrowserClient
       const override;
   extensions::ProcessManagerDelegate* GetProcessManagerDelegate()
       const override;
+  mojo::PendingRemote<network::mojom::URLLoaderFactory>
+  GetControlledFrameEmbedderURLLoader(
+      const url::Origin& app_origin,
+      content::FrameTreeNodeId frame_tree_node_id,
+      content::BrowserContext* browser_context) override;
   std::unique_ptr<extensions::ExtensionHostDelegate>
   CreateExtensionHostDelegate() override;
   bool DidVersionUpdate(content::BrowserContext* context) override;
@@ -104,11 +132,13 @@ class ElectronExtensionsBrowserClient
   void BroadcastEventToRenderers(
       extensions::events::HistogramValue histogram_value,
       const std::string& event_name,
-      std::unique_ptr<base::ListValue> args,
+      base::Value::List args,
       bool dispatch_to_off_the_record_profiles) override;
   extensions::ExtensionCache* GetExtensionCache() override;
   bool IsBackgroundUpdateAllowed() override;
   bool IsMinBrowserVersionSupported(const std::string& min_version) override;
+  void CreateExtensionWebContentsObserver(
+      content::WebContents* web_contents) override;
   extensions::ExtensionWebContentsObserver* GetExtensionWebContentsObserver(
       content::WebContents* web_contents) override;
   extensions::KioskDelegate* GetKioskDelegate() override;
@@ -138,10 +168,8 @@ class ElectronExtensionsBrowserClient
 
   std::unique_ptr<extensions::ElectronComponentExtensionResourceManager>
       resource_manager_;
-
-  DISALLOW_COPY_AND_ASSIGN(ElectronExtensionsBrowserClient);
 };
 
 }  // namespace electron
 
-#endif  // SHELL_BROWSER_EXTENSIONS_ELECTRON_EXTENSIONS_BROWSER_CLIENT_H_
+#endif  // ELECTRON_SHELL_BROWSER_EXTENSIONS_ELECTRON_EXTENSIONS_BROWSER_CLIENT_H_

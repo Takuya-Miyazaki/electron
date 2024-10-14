@@ -1,16 +1,19 @@
-import { app, BrowserWindow, WebContents, MenuItemConstructorOptions } from 'electron/main';
+import { app, BaseWindow, BrowserWindow, session, webContents, WebContents, MenuItemConstructorOptions } from 'electron/main';
 
 const isMac = process.platform === 'darwin';
 const isWindows = process.platform === 'win32';
 const isLinux = process.platform === 'linux';
 
 type RoleId = 'about' | 'close' | 'copy' | 'cut' | 'delete' | 'forcereload' | 'front' | 'help' | 'hide' | 'hideothers' | 'minimize' |
-  'paste' | 'pasteandmatchstyle' | 'quit' | 'redo' | 'reload' | 'resetzoom' | 'selectall' | 'services' | 'recentdocuments' | 'clearrecentdocuments' | 'startspeaking' | 'stopspeaking' |
-  'toggledevtools' | 'togglefullscreen' | 'undo' | 'unhide' | 'window' | 'zoom' | 'zoomin' | 'zoomout' | 'appmenu' | 'filemenu' | 'editmenu' | 'viewmenu' | 'windowmenu'
+  'paste' | 'pasteandmatchstyle' | 'quit' | 'redo' | 'reload' | 'resetzoom' | 'selectall' | 'services' | 'recentdocuments' | 'clearrecentdocuments' |
+  'showsubstitutions' | 'togglesmartquotes' | 'togglesmartdashes' | 'toggletextreplacement' | 'startspeaking' | 'stopspeaking' |
+  'toggledevtools' | 'togglefullscreen' | 'undo' | 'unhide' | 'window' | 'zoom' | 'zoomin' | 'zoomout' | 'togglespellchecker' |
+  'appmenu' | 'filemenu' | 'editmenu' | 'viewmenu' | 'windowmenu' | 'sharemenu'
 interface Role {
   label: string;
   accelerator?: string;
-  windowMethod?: ((window: BrowserWindow) => void);
+  checked?: boolean;
+  windowMethod?: ((window: BaseWindow) => void);
   webContentsMethod?: ((webContents: WebContents) => void);
   appMethod?: () => void;
   registerAccelerator?: boolean;
@@ -23,7 +26,7 @@ export const roleList: Record<RoleId, Role> = {
     get label () {
       return isLinux ? 'About' : `About ${app.name}`;
     },
-    ...(isWindows && { appMethod: () => app.showAboutPanel() })
+    ...((isWindows || isLinux) && { appMethod: () => app.showAboutPanel() })
   },
   close: {
     label: isMac ? 'Close Window' : 'Close',
@@ -50,8 +53,10 @@ export const roleList: Record<RoleId, Role> = {
     label: 'Force Reload',
     accelerator: 'Shift+CmdOrCtrl+R',
     nonNativeMacOSRole: true,
-    windowMethod: (window: BrowserWindow) => {
-      window.webContents.reloadIgnoringCache();
+    windowMethod: (window: BaseWindow) => {
+      if (window instanceof BrowserWindow) {
+        window.webContents.reloadIgnoringCache();
+      }
     }
   },
   front: {
@@ -107,7 +112,11 @@ export const roleList: Record<RoleId, Role> = {
     label: 'Reload',
     accelerator: 'CmdOrCtrl+R',
     nonNativeMacOSRole: true,
-    windowMethod: w => w.reload()
+    windowMethod: (w: BaseWindow) => {
+      if (w instanceof BrowserWindow) {
+        w.reload();
+      }
+    }
   },
   resetzoom: {
     label: 'Actual Size',
@@ -131,6 +140,18 @@ export const roleList: Record<RoleId, Role> = {
   clearrecentdocuments: {
     label: 'Clear Menu'
   },
+  showsubstitutions: {
+    label: 'Show Substitutions'
+  },
+  togglesmartquotes: {
+    label: 'Smart Quotes'
+  },
+  togglesmartdashes: {
+    label: 'Smart Dashes'
+  },
+  toggletextreplacement: {
+    label: 'Text Replacement'
+  },
   startspeaking: {
     label: 'Start Speaking'
   },
@@ -141,12 +162,15 @@ export const roleList: Record<RoleId, Role> = {
     label: 'Toggle Developer Tools',
     accelerator: isMac ? 'Alt+Command+I' : 'Ctrl+Shift+I',
     nonNativeMacOSRole: true,
-    windowMethod: w => w.webContents.toggleDevTools()
+    webContentsMethod: wc => {
+      const bw = wc.getOwnerBrowserWindow();
+      if (bw) bw.webContents.toggleDevTools();
+    }
   },
   togglefullscreen: {
     label: 'Toggle Full Screen',
     accelerator: isMac ? 'Control+Command+F' : 'F11',
-    windowMethod: (window: BrowserWindow) => {
+    windowMethod: (window: BaseWindow) => {
       window.setFullScreen(!window.isFullScreen());
     }
   },
@@ -178,6 +202,19 @@ export const roleList: Record<RoleId, Role> = {
     nonNativeMacOSRole: true,
     webContentsMethod: (webContents: WebContents) => {
       webContents.zoomLevel -= 0.5;
+    }
+  },
+  togglespellchecker: {
+    label: 'Check Spelling While Typing',
+    get checked () {
+      const wc = webContents.getFocusedWebContents();
+      const ses = wc ? wc.session : session.defaultSession;
+      return ses.spellCheckerEnabled;
+    },
+    nonNativeMacOSRole: true,
+    webContentsMethod: (wc: WebContents) => {
+      const ses = wc ? wc.session : session.defaultSession;
+      ses.spellCheckerEnabled = !ses.spellCheckerEnabled;
     }
   },
   // App submenu should be used for Mac only
@@ -214,23 +251,35 @@ export const roleList: Record<RoleId, Role> = {
       { role: 'cut' },
       { role: 'copy' },
       { role: 'paste' },
-      ...(isMac ? [
-        { role: 'pasteAndMatchStyle' },
-        { role: 'delete' },
-        { role: 'selectAll' },
-        { type: 'separator' },
-        {
-          label: 'Speech',
-          submenu: [
-            { role: 'startSpeaking' },
-            { role: 'stopSpeaking' }
-          ]
-        }
-      ] as MenuItemConstructorOptions[] : [
-        { role: 'delete' },
-        { type: 'separator' },
-        { role: 'selectAll' }
-      ] as MenuItemConstructorOptions[])
+      ...(isMac
+        ? [
+          { role: 'pasteAndMatchStyle' },
+          { role: 'delete' },
+          { role: 'selectAll' },
+          { type: 'separator' },
+          {
+            label: 'Substitutions',
+            submenu: [
+              { role: 'showSubstitutions' },
+              { type: 'separator' },
+              { role: 'toggleSmartQuotes' },
+              { role: 'toggleSmartDashes' },
+              { role: 'toggleTextReplacement' }
+            ]
+          },
+          {
+            label: 'Speech',
+            submenu: [
+              { role: 'startSpeaking' },
+              { role: 'stopSpeaking' }
+            ]
+          }
+        ] as MenuItemConstructorOptions[]
+        : [
+          { role: 'delete' },
+          { type: 'separator' },
+          { role: 'selectAll' }
+        ] as MenuItemConstructorOptions[])
     ]
   },
   // View submenu
@@ -254,39 +303,63 @@ export const roleList: Record<RoleId, Role> = {
     submenu: [
       { role: 'minimize' },
       { role: 'zoom' },
-      ...(isMac ? [
-        { type: 'separator' },
-        { role: 'front' }
-      ] as MenuItemConstructorOptions[] : [
-        { role: 'close' }
-      ] as MenuItemConstructorOptions[])
+      ...(isMac
+        ? [
+          { type: 'separator' },
+          { role: 'front' }
+        ] as MenuItemConstructorOptions[]
+        : [
+          { role: 'close' }
+        ] as MenuItemConstructorOptions[])
     ]
+  },
+  // Share submenu
+  sharemenu: {
+    label: 'Share',
+    submenu: []
   }
 };
 
+const hasRole = (role: keyof typeof roleList) => {
+  return Object.hasOwn(roleList, role);
+};
+
 const canExecuteRole = (role: keyof typeof roleList) => {
-  if (!Object.prototype.hasOwnProperty.call(roleList, role)) return false;
+  if (!hasRole(role)) return false;
   if (!isMac) return true;
 
   // macOS handles all roles natively except for a few
   return roleList[role].nonNativeMacOSRole;
 };
 
+export function getDefaultType (role: RoleId) {
+  if (shouldOverrideCheckStatus(role)) return 'checkbox';
+  return 'normal';
+}
+
 export function getDefaultLabel (role: RoleId) {
-  return Object.prototype.hasOwnProperty.call(roleList, role) ? roleList[role].label : '';
+  return hasRole(role) ? roleList[role].label : '';
+}
+
+export function getCheckStatus (role: RoleId) {
+  if (hasRole(role)) return roleList[role].checked;
+}
+
+export function shouldOverrideCheckStatus (role: RoleId) {
+  return hasRole(role) && Object.hasOwn(roleList[role], 'checked');
 }
 
 export function getDefaultAccelerator (role: RoleId) {
-  if (Object.prototype.hasOwnProperty.call(roleList, role)) return roleList[role].accelerator;
+  if (hasRole(role)) return roleList[role].accelerator;
 }
 
 export function shouldRegisterAccelerator (role: RoleId) {
-  const hasRoleRegister = Object.prototype.hasOwnProperty.call(roleList, role) && roleList[role].registerAccelerator !== undefined;
+  const hasRoleRegister = hasRole(role) && roleList[role].registerAccelerator !== undefined;
   return hasRoleRegister ? roleList[role].registerAccelerator : true;
 }
 
 export function getDefaultSubmenu (role: RoleId) {
-  if (!Object.prototype.hasOwnProperty.call(roleList, role)) return;
+  if (!hasRole(role)) return;
 
   let { submenu } = roleList[role];
 
@@ -298,7 +371,7 @@ export function getDefaultSubmenu (role: RoleId) {
   return submenu;
 }
 
-export function execute (role: RoleId, focusedWindow: BrowserWindow, focusedWebContents: WebContents) {
+export function execute (role: RoleId, focusedWindow: BaseWindow, focusedWebContents: WebContents) {
   if (!canExecuteRole(role)) return false;
 
   const { appMethod, webContentsMethod, windowMethod } = roleList[role];

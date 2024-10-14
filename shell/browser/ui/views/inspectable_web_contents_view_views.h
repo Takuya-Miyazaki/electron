@@ -2,14 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-CHROMIUM file.
 
-#ifndef SHELL_BROWSER_UI_VIEWS_INSPECTABLE_WEB_CONTENTS_VIEW_VIEWS_H_
-#define SHELL_BROWSER_UI_VIEWS_INSPECTABLE_WEB_CONTENTS_VIEW_VIEWS_H_
+#ifndef ELECTRON_SHELL_BROWSER_UI_VIEWS_INSPECTABLE_WEB_CONTENTS_VIEW_VIEWS_H_
+#define ELECTRON_SHELL_BROWSER_UI_VIEWS_INSPECTABLE_WEB_CONTENTS_VIEW_VIEWS_H_
 
 #include <memory>
 
 #include "base/compiler_specific.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/devtools/devtools_contents_resizing_strategy.h"
 #include "shell/browser/ui/inspectable_web_contents_view.h"
+#include "third_party/skia/include/core/SkRegion.h"
 #include "ui/views/view.h"
 
 namespace views {
@@ -20,8 +22,6 @@ class WidgetDelegate;
 
 namespace electron {
 
-class InspectableWebContents;
-
 class InspectableWebContentsViewViews : public InspectableWebContentsView,
                                         public views::View {
  public:
@@ -31,42 +31,33 @@ class InspectableWebContentsViewViews : public InspectableWebContentsView,
 
   // InspectableWebContentsView:
   views::View* GetView() override;
-  views::View* GetWebView() override;
   void ShowDevTools(bool activate) override;
+  void SetCornerRadii(const gfx::RoundedCornersF& corner_radii) override;
   void CloseDevTools() override;
   bool IsDevToolsViewShowing() override;
   bool IsDevToolsViewFocused() override;
   void SetIsDocked(bool docked, bool activate) override;
   void SetContentsResizingStrategy(
       const DevToolsContentsResizingStrategy& strategy) override;
-  void SetTitle(const base::string16& title) override;
+  void SetTitle(const std::u16string& title) override;
+  const std::u16string GetTitle() override;
 
-  InspectableWebContents* inspectable_web_contents() {
-    return inspectable_web_contents_;
-  }
-
-  const base::string16& GetTitle() const { return title_; }
+  // views::View:
+  void Layout(PassKey) override;
 
  private:
-  // views::View:
-  void Layout() override;
-
-  // Owns us.
-  InspectableWebContents* inspectable_web_contents_;
-
   std::unique_ptr<views::Widget> devtools_window_;
-  views::WebView* devtools_window_web_view_;
-  views::View* contents_web_view_;
-  views::WebView* devtools_web_view_;
+  raw_ptr<views::WebView> devtools_window_web_view_ = nullptr;
+  raw_ptr<views::WebView> contents_web_view_ = nullptr;
+  raw_ptr<views::View> contents_view_ = nullptr;
+  raw_ptr<views::WebView> devtools_web_view_ = nullptr;
 
   DevToolsContentsResizingStrategy strategy_;
-  bool devtools_visible_;
-  views::WidgetDelegate* devtools_window_delegate_;
-  base::string16 title_;
-
-  DISALLOW_COPY_AND_ASSIGN(InspectableWebContentsViewViews);
+  bool devtools_visible_ = false;
+  raw_ptr<views::WidgetDelegate> devtools_window_delegate_ = nullptr;
+  std::u16string title_;
 };
 
 }  // namespace electron
 
-#endif  // SHELL_BROWSER_UI_VIEWS_INSPECTABLE_WEB_CONTENTS_VIEW_VIEWS_H_
+#endif  // ELECTRON_SHELL_BROWSER_UI_VIEWS_INSPECTABLE_WEB_CONTENTS_VIEW_VIEWS_H_

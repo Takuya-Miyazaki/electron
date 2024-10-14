@@ -5,12 +5,11 @@
 #include "electron/shell/renderer/electron_api_service_impl.h"
 
 #include <memory>
+#include <tuple>
 #include <utility>
 #include <vector>
 
-#include "base/environment.h"
-#include "base/macros.h"
-#include "base/threading/thread_restrictions.h"
+#include "base/trace_event/trace_event.h"
 #include "gin/data_object_builder.h"
 #include "mojo/public/cpp/system/platform_handle.h"
 #include "shell/common/electron_constants.h"
@@ -19,10 +18,12 @@
 #include "shell/common/heap_snapshot.h"
 #include "shell/common/node_includes.h"
 #include "shell/common/options_switches.h"
-#include "shell/common/v8_value_serializer.h"
+#include "shell/common/thread_restrictions.h"
+#include "shell/common/v8_util.h"
 #include "shell/renderer/electron_render_frame_observer.h"
 #include "shell/renderer/renderer_client_base.h"
 #include "third_party/blink/public/mojom/frame/user_activation_notification_type.mojom-shared.h"
+#include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
 #include "third_party/blink/public/web/blink.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "third_party/blink/public/web/web_message_port_converter.h"
@@ -60,10 +61,10 @@ void InvokeIpcCallback(v8::Local<v8::Context> context,
 
   // Only set up the node::CallbackScope if there's a node environment.
   // Sandboxed renderers don't have a node environment.
-  node::Environment* env = node::Environment::GetCurrent(context);
   std::unique_ptr<node::CallbackScope> callback_scope;
-  if (env) {
-    callback_scope.reset(new node::CallbackScope(isolate, ipcNative, {0, 0}));
+  if (node::Environment::GetCurrent(context)) {
+    callback_scope = std::make_unique<node::CallbackScope>(
+        isolate, ipcNative, node::async_context{0, 0});
   }
 
   auto callback_key = gin::ConvertToV8(isolate, callback_name)
@@ -72,26 +73,24 @@ void InvokeIpcCallback(v8::Local<v8::Context> context,
   auto callback_value = ipcNative->Get(context, callback_key).ToLocalChecked();
   DCHECK(callback_value->IsFunction());  // set by init.ts
   auto callback = callback_value.As<v8::Function>();
-  ignore_result(callback->Call(context, ipcNative, args.size(), args.data()));
+  std::ignore = callback->Call(context, ipcNative, args.size(), args.data());
 }
 
 void EmitIPCEvent(v8::Local<v8::Context> context,
                   bool internal,
                   const std::string& channel,
                   std::vector<v8::Local<v8::Value>> ports,
-                  v8::Local<v8::Value> args,
-                  int32_t sender_id) {
+                  v8::Local<v8::Value> args) {
   auto* isolate = context->GetIsolate();
 
   v8::HandleScope handle_scope(isolate);
   v8::Context::Scope context_scope(context);
-  v8::MicrotasksScope script_scope(isolate,
+  v8::MicrotasksScope script_scope(isolate, context->GetMicrotaskQueue(),
                                    v8::MicrotasksScope::kRunMicrotasks);
 
   std::vector<v8::Local<v8::Value>> argv = {
       gin::ConvertToV8(isolate, internal), gin::ConvertToV8(isolate, channel),
-      gin::ConvertToV8(isolate, ports), args,
-      gin::ConvertToV8(isolate, sender_id)};
+      gin::ConvertToV8(isolate, ports), args};
 
   InvokeIpcCallback(context, "onMessage", argv);
 }
@@ -104,22 +103,42 @@ ElectronApiServiceImpl::ElectronApiServiceImpl(
     content::RenderFrame* render_frame,
     RendererClientBase* renderer_client)
     : content::RenderFrameObserver(render_frame),
-      renderer_client_(renderer_client),
-      weak_factory_(this) {}
+      renderer_client_(renderer_client) {
+  registry_.AddInterface<mojom::ElectronRenderer>(base::BindRepeating(
+      &ElectronApiServiceImpl::BindTo, base::Unretained(this)));
+}
 
 void ElectronApiServiceImpl::BindTo(
-    mojo::PendingAssociatedReceiver<mojom::ElectronRenderer> receiver) {
-  // Note: BindTo might be called for multiple times.
-  if (receiver_.is_bound())
-    receiver_.reset();
+    mojo::PendingReceiver<mojom::ElectronRenderer> receiver) {
+  if (document_created_) {
+    if (receiver_.is_bound())
+      receiver_.reset();
 
-  receiver_.Bind(std::move(receiver));
-  receiver_.set_disconnect_handler(
-      base::BindOnce(&ElectronApiServiceImpl::OnConnectionError, GetWeakPtr()));
+    receiver_.Bind(std::move(receiver));
+    receiver_.set_disconnect_handler(base::BindOnce(
+        &ElectronApiServiceImpl::OnConnectionError, GetWeakPtr()));
+  } else {
+    pending_receiver_ = std::move(receiver);
+  }
+}
+
+void ElectronApiServiceImpl::OnInterfaceRequestForFrame(
+    const std::string& interface_name,
+    mojo::ScopedMessagePipeHandle* interface_pipe) {
+  registry_.TryBindInterface(interface_name, interface_pipe);
 }
 
 void ElectronApiServiceImpl::DidCreateDocumentElement() {
   document_created_ = true;
+
+  if (pending_receiver_) {
+    if (receiver_.is_bound())
+      receiver_.reset();
+
+    receiver_.Bind(std::move(pending_receiver_));
+    receiver_.set_disconnect_handler(base::BindOnce(
+        &ElectronApiServiceImpl::OnConnectionError, GetWeakPtr()));
+  }
 }
 
 void ElectronApiServiceImpl::OnDestruct() {
@@ -132,34 +151,13 @@ void ElectronApiServiceImpl::OnConnectionError() {
 }
 
 void ElectronApiServiceImpl::Message(bool internal,
-                                     bool send_to_all,
                                      const std::string& channel,
-                                     blink::CloneableMessage arguments,
-                                     int32_t sender_id) {
-  // Don't handle browser messages before document element is created.
-  //
-  // Note: It is probably better to save the message and then replay it after
-  // document is ready, but current behavior has been there since the first
-  // day of Electron, and no one has complained so far.
-  //
-  // Reason 1:
-  // When we receive a message from the browser, we try to transfer it
-  // to a web page, and when we do that Blink creates an empty
-  // document element if it hasn't been created yet, and it makes our init
-  // script to run while `window.location` is still "about:blank".
-  // (See https://github.com/electron/electron/pull/1044.)
-  //
-  // Reason 2:
-  // The libuv message loop integration would be broken for unkown reasons.
-  // (See https://github.com/electron/electron/issues/19368.)
-  if (!document_created_)
-    return;
-
+                                     blink::CloneableMessage arguments) {
   blink::WebLocalFrame* frame = render_frame()->GetWebFrame();
   if (!frame)
     return;
 
-  v8::Isolate* isolate = blink::MainThreadIsolate();
+  v8::Isolate* isolate = frame->GetAgentGroupScheduler()->Isolate();
   v8::HandleScope handle_scope(isolate);
 
   v8::Local<v8::Context> context = renderer_client_->GetContext(frame, isolate);
@@ -167,19 +165,7 @@ void ElectronApiServiceImpl::Message(bool internal,
 
   v8::Local<v8::Value> args = gin::ConvertToV8(isolate, arguments);
 
-  EmitIPCEvent(context, internal, channel, {}, args, sender_id);
-
-  // Also send the message to all sub-frames.
-  // TODO(MarshallOfSound): Completely move this logic to the main process
-  if (send_to_all) {
-    for (blink::WebFrame* child = frame->FirstChild(); child;
-         child = child->NextSibling())
-      if (child->IsWebLocalFrame()) {
-        v8::Local<v8::Context> child_context =
-            renderer_client_->GetContext(child->ToWebLocalFrame(), isolate);
-        EmitIPCEvent(child_context, internal, channel, {}, args, sender_id);
-      }
-  }
+  EmitIPCEvent(context, internal, channel, {}, args);
 }
 
 void ElectronApiServiceImpl::ReceivePostMessage(
@@ -189,7 +175,7 @@ void ElectronApiServiceImpl::ReceivePostMessage(
   if (!frame)
     return;
 
-  v8::Isolate* isolate = blink::MainThreadIsolate();
+  v8::Isolate* isolate = frame->GetAgentGroupScheduler()->Isolate();
   v8::HandleScope handle_scope(isolate);
 
   v8::Local<v8::Context> context = renderer_client_->GetContext(frame, isolate);
@@ -206,33 +192,29 @@ void ElectronApiServiceImpl::ReceivePostMessage(
 
   std::vector<v8::Local<v8::Value>> args = {message_value};
 
-  EmitIPCEvent(context, false, channel, ports, gin::ConvertToV8(isolate, args),
-               0);
-}
-
-void ElectronApiServiceImpl::NotifyUserActivation() {
-  blink::WebLocalFrame* frame = render_frame()->GetWebFrame();
-  if (frame)
-    frame->NotifyUserActivation(
-        blink::mojom::UserActivationNotificationType::kInteraction);
+  EmitIPCEvent(context, false, channel, ports, gin::ConvertToV8(isolate, args));
 }
 
 void ElectronApiServiceImpl::TakeHeapSnapshot(
     mojo::ScopedHandle file,
     TakeHeapSnapshotCallback callback) {
-  base::ThreadRestrictions::ScopedAllowIO allow_io;
+  blink::WebLocalFrame* frame = render_frame()->GetWebFrame();
+  if (!frame)
+    return;
 
-  base::PlatformFile platform_file;
+  ScopedAllowBlockingForElectron allow_blocking;
+
+  base::ScopedPlatformFile platform_file;
   if (mojo::UnwrapPlatformFile(std::move(file), &platform_file) !=
       MOJO_RESULT_OK) {
     LOG(ERROR) << "Unable to get the file handle from mojo.";
     std::move(callback).Run(false);
     return;
   }
-  base::File base_file(platform_file);
+  base::File base_file(std::move(platform_file));
 
-  bool success =
-      electron::TakeHeapSnapshot(blink::MainThreadIsolate(), &base_file);
+  v8::Isolate* isolate = frame->GetAgentGroupScheduler()->Isolate();
+  bool success = electron::TakeHeapSnapshot(isolate, &base_file);
 
   std::move(callback).Run(success);
 }

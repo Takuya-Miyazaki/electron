@@ -2,22 +2,24 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_OSR_OSR_HOST_DISPLAY_CLIENT_H_
-#define SHELL_BROWSER_OSR_OSR_HOST_DISPLAY_CLIENT_H_
+#ifndef ELECTRON_SHELL_BROWSER_OSR_OSR_HOST_DISPLAY_CLIENT_H_
+#define ELECTRON_SHELL_BROWSER_OSR_OSR_HOST_DISPLAY_CLIENT_H_
 
 #include <memory>
 
-#include "base/callback.h"
+#include "base/functional/callback_forward.h"
 #include "base/memory/shared_memory_mapping.h"
 #include "components/viz/host/host_display_client.h"
 #include "services/viz/privileged/mojom/compositing/layered_window_updater.mojom.h"
+#include "shell/browser/osr/osr_paint_event.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "third_party/skia/include/core/SkCanvas.h"
 #include "ui/gfx/native_widget_types.h"
 
-namespace electron {
+class SkBitmap;
+class SkCanvas;
 
-typedef base::Callback<void(const gfx::Rect&, const SkBitmap&)> OnPaintCallback;
+namespace electron {
 
 class LayeredWindowUpdater : public viz::mojom::LayeredWindowUpdater {
  public:
@@ -25,6 +27,10 @@ class LayeredWindowUpdater : public viz::mojom::LayeredWindowUpdater {
       mojo::PendingReceiver<viz::mojom::LayeredWindowUpdater> receiver,
       OnPaintCallback callback);
   ~LayeredWindowUpdater() override;
+
+  // disable copy
+  LayeredWindowUpdater(const LayeredWindowUpdater&) = delete;
+  LayeredWindowUpdater& operator=(const LayeredWindowUpdater&) = delete;
 
   void SetActive(bool active);
 
@@ -42,8 +48,6 @@ class LayeredWindowUpdater : public viz::mojom::LayeredWindowUpdater {
 #if !defined(WIN32)
   base::WritableSharedMemoryMapping shm_mapping_;
 #endif
-
-  DISALLOW_COPY_AND_ASSIGN(LayeredWindowUpdater);
 };
 
 class OffScreenHostDisplayClient : public viz::HostDisplayClient {
@@ -52,12 +56,16 @@ class OffScreenHostDisplayClient : public viz::HostDisplayClient {
                                       OnPaintCallback callback);
   ~OffScreenHostDisplayClient() override;
 
+  // disable copy
+  OffScreenHostDisplayClient(const OffScreenHostDisplayClient&) = delete;
+  OffScreenHostDisplayClient& operator=(const OffScreenHostDisplayClient&) =
+      delete;
+
   void SetActive(bool active);
 
  private:
-  void IsOffscreen(IsOffscreenCallback callback) override;
-
-#if defined(OS_MAC)
+  // viz::HostDisplayClient
+#if BUILDFLAG(IS_MAC)
   void OnDisplayReceivedCALayerParams(
       const gfx::CALayerParams& ca_layer_params) override;
 #endif
@@ -66,17 +74,15 @@ class OffScreenHostDisplayClient : public viz::HostDisplayClient {
       mojo::PendingReceiver<viz::mojom::LayeredWindowUpdater> receiver)
       override;
 
-#if defined(OS_LINUX) && !defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_LINUX) && !BUILDFLAG(IS_CHROMEOS)
   void DidCompleteSwapWithNewSize(const gfx::Size& size) override;
 #endif
 
   std::unique_ptr<LayeredWindowUpdater> layered_window_updater_;
   OnPaintCallback callback_;
   bool active_ = false;
-
-  DISALLOW_COPY_AND_ASSIGN(OffScreenHostDisplayClient);
 };
 
 }  // namespace electron
 
-#endif  // SHELL_BROWSER_OSR_OSR_HOST_DISPLAY_CLIENT_H_
+#endif  // ELECTRON_SHELL_BROWSER_OSR_OSR_HOST_DISPLAY_CLIENT_H_

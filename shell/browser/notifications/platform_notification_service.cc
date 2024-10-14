@@ -4,7 +4,6 @@
 
 #include "shell/browser/notifications/platform_notification_service.h"
 
-#include "base/strings/utf_string_conversions.h"
 #include "content/public/browser/notification_event_dispatcher.h"
 #include "content/public/browser/render_process_host.h"
 #include "shell/browser/electron_browser_client.h"
@@ -35,6 +34,9 @@ void OnWebNotificationAllowed(base::WeakPtr<Notification> notification,
     options.icon = icon;
     options.silent = audio_muted ? true : data.silent;
     options.has_reply = false;
+    if (data.require_interaction)
+      options.timeout_type = u"never";
+
     notification->Show(options);
   } else {
     notification->Destroy();
@@ -46,6 +48,11 @@ class NotificationDelegateImpl final : public electron::NotificationDelegate {
   explicit NotificationDelegateImpl(const std::string& notification_id)
       : notification_id_(notification_id) {}
 
+  // disable copy
+  NotificationDelegateImpl(const NotificationDelegateImpl&) = delete;
+  NotificationDelegateImpl& operator=(const NotificationDelegateImpl&) = delete;
+
+  // electron::NotificationDelegate
   void NotificationDestroyed() override { delete this; }
 
   void NotificationClick() override {
@@ -65,8 +72,6 @@ class NotificationDelegateImpl final : public electron::NotificationDelegate {
 
  private:
   std::string notification_id_;
-
-  DISALLOW_COPY_AND_ASSIGN(NotificationDelegateImpl);
 };
 
 }  // namespace
@@ -78,9 +83,10 @@ PlatformNotificationService::PlatformNotificationService(
 PlatformNotificationService::~PlatformNotificationService() = default;
 
 void PlatformNotificationService::DisplayNotification(
-    content::RenderProcessHost* render_process_host,
+    content::RenderFrameHost* render_frame_host,
     const std::string& notification_id,
     const GURL& origin,
+    const GURL& document_url,
     const blink::PlatformNotificationData& notification_data,
     const blink::NotificationResources& notification_resources) {
   auto* presenter = browser_client_->GetNotificationPresenter();
@@ -96,28 +102,17 @@ void PlatformNotificationService::DisplayNotification(
   // See: https://notifications.spec.whatwg.org/#showing-a-notification
   presenter->CloseNotificationWithId(notification_id);
 
-  NotificationDelegateImpl* delegate =
-      new NotificationDelegateImpl(notification_id);
+  auto* delegate = new NotificationDelegateImpl(notification_id);
 
   auto notification = presenter->CreateNotification(delegate, notification_id);
   if (notification) {
     browser_client_->WebNotificationAllowed(
-        render_process_host->GetID(),
+        render_frame_host,
         base::BindRepeating(&OnWebNotificationAllowed, notification,
                             notification_resources.notification_icon,
                             notification_data));
   }
 }
-
-void PlatformNotificationService::DisplayPersistentNotification(
-    const std::string& notification_id,
-    const GURL& service_worker_scope,
-    const GURL& origin,
-    const blink::PlatformNotificationData& notification_data,
-    const blink::NotificationResources& notification_resources) {}
-
-void PlatformNotificationService::ClosePersistentNotification(
-    const std::string& notification_id) {}
 
 void PlatformNotificationService::CloseNotification(
     const std::string& notification_id) {
@@ -128,6 +123,10 @@ void PlatformNotificationService::CloseNotification(
 }
 
 void PlatformNotificationService::GetDisplayedNotifications(
+    DisplayedNotificationsCallback callback) {}
+
+void PlatformNotificationService::GetDisplayedNotificationsForOrigin(
+    const GURL& origin,
     DisplayedNotificationsCallback callback) {}
 
 int64_t PlatformNotificationService::ReadNextPersistentNotificationId() {

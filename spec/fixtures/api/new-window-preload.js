@@ -1,4 +1,6 @@
 const { ipcRenderer } = require('electron');
 
-ipcRenderer.send('answer', process.argv);
+ipcRenderer.send('answer', {
+  argv: process.argv
+});
 window.close();

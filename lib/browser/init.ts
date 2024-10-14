@@ -1,44 +1,22 @@
-import { Buffer } from 'buffer';
+import type * as defaultMenuModule from '@electron/internal/browser/default-menu';
+
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
-import { Socket } from 'net';
 import * as path from 'path';
-import * as util from 'util';
-const Module = require('module');
+
+import type * as url from 'url';
+import type * as v8 from 'v8';
+
+const Module = require('module') as NodeJS.ModuleInternal;
 
 // We modified the original process.argv to let node.js load the init.js,
 // we need to restore it here.
 process.argv.splice(1, 1);
 
-// Clear search paths.
-require('../common/reset-search-paths');
-
 // Import common settings.
 require('@electron/internal/common/init');
 
 process._linkedBinding('electron_browser_event_emitter').setEventEmitterPrototype(EventEmitter.prototype);
-
-if (process.platform === 'win32') {
-  // Redirect node's console to use our own implementations, since node can not
-  // handle console output when running as GUI program.
-  const consoleLog = (...args: any[]) => {
-    // @ts-ignore this typing is incorrect; 'format' is an optional parameter
-    // See https://nodejs.org/api/util.html#util_util_format_format_args
-    return process.log(util.format(...args) + '\n');
-  };
-  const streamWrite: Socket['write'] = function (chunk: Buffer | string, encoding?: any, callback?: Function) {
-    if (Buffer.isBuffer(chunk)) {
-      chunk = chunk.toString(encoding);
-    }
-    process.log(chunk);
-    if (callback) {
-      callback();
-    }
-    return true;
-  };
-  console.log = console.error = console.warn = consoleLog;
-  process.stdout.write = process.stderr.write = streamWrite;
-}
 
 // Don't quit on fatal error.
 process.on('uncaughtException', function (error) {
@@ -62,7 +40,7 @@ process.on('uncaughtException', function (error) {
 // Emit 'exit' event on quit.
 const { app } = require('electron');
 
-app.on('quit', function (event, exitCode) {
+app.on('quit', (_event, exitCode) => {
   process.emit('exit', exitCode);
 });
 
@@ -85,8 +63,8 @@ if (process.platform === 'win32') {
 
   if (fs.existsSync(updateDotExe)) {
     const packageDir = path.dirname(path.resolve(updateDotExe));
-    const packageName = path.basename(packageDir).replace(/\s/g, '');
-    const exeName = path.basename(process.execPath).replace(/\.exe$/i, '').replace(/\s/g, '');
+    const packageName = path.basename(packageDir).replaceAll(/\s/g, '');
+    const exeName = path.basename(process.execPath).replace(/\.exe$/i, '').replaceAll(/\s/g, '');
 
     app.setAppUserModelId(`com.squirrel.${packageName}.${exeName}`);
   }
@@ -100,17 +78,26 @@ require('@electron/internal/browser/rpc-server');
 
 // Load the guest view manager.
 require('@electron/internal/browser/guest-view-manager');
-require('@electron/internal/browser/guest-window-manager');
 
 // Now we try to load app's package.json.
+const v8Util = process._linkedBinding('electron_common_v8_util');
 let packagePath = null;
 let packageJson = null;
-const searchPaths = ['app', 'app.asar', 'default_app.asar'];
+const searchPaths: string[] = v8Util.getHiddenValue(global, 'appSearchPaths');
+const searchPathsOnlyLoadASAR: boolean = v8Util.getHiddenValue(global, 'appSearchPathsOnlyLoadASAR');
+// Borrow the _getOrCreateArchive asar helper
+const getOrCreateArchive = process._getOrCreateArchive;
+delete process._getOrCreateArchive;
 
 if (process.resourcesPath) {
   for (packagePath of searchPaths) {
     try {
       packagePath = path.join(process.resourcesPath, packagePath);
+      if (searchPathsOnlyLoadASAR) {
+        if (!getOrCreateArchive?.(packagePath)) {
+          continue;
+        }
+      }
       packageJson = Module._load(path.join(packagePath, 'package.json'));
       break;
     } catch {
@@ -145,38 +132,41 @@ if (packageJson.desktopName != null) {
   app.setDesktopName(`${app.name}.desktop`);
 }
 
-// Set v8 flags, delibrately lazy load so that apps that do not use this
+// Set v8 flags, deliberately lazy load so that apps that do not use this
 // feature do not pay the price
 if (packageJson.v8Flags != null) {
-  require('v8').setFlagsFromString(packageJson.v8Flags);
+  (require('v8') as typeof v8).setFlagsFromString(packageJson.v8Flags);
 }
 
-app._setDefaultAppPaths(packagePath);
+app.setAppPath(packagePath);
 
 // Load the chrome devtools support.
 require('@electron/internal/browser/devtools');
 
-// Load the chrome extension support.
-require('@electron/internal/browser/chrome-extension-shim');
-
-if (BUILDFLAG(ENABLE_REMOTE_MODULE)) {
-  require('@electron/internal/browser/remote/server');
-}
-
 // Load protocol module to ensure it is populated on app ready
 require('@electron/internal/browser/api/protocol');
+
+// Load web-contents module to ensure it is populated on app ready
+require('@electron/internal/browser/api/web-contents');
+
+// Load web-frame-main module to ensure it is populated on app ready
+require('@electron/internal/browser/api/web-frame-main');
+
+// Required because `new BrowserWindow` calls some WebContentsView stuff, so
+// the inheritance needs to be set up before that happens.
+require('@electron/internal/browser/api/web-contents-view');
 
 // Set main startup script of the app.
 const mainStartupScript = packageJson.main || 'index.js';
 
-const KNOWN_XDG_DESKTOP_VALUES = ['Pantheon', 'Unity:Unity7', 'pop:GNOME'];
+const KNOWN_XDG_DESKTOP_VALUES = new Set(['Pantheon', 'Unity:Unity7', 'pop:GNOME']);
 
 function currentPlatformSupportsAppIndicator () {
   if (process.platform !== 'linux') return false;
   const currentDesktop = process.env.XDG_CURRENT_DESKTOP;
 
   if (!currentDesktop) return false;
-  if (KNOWN_XDG_DESKTOP_VALUES.includes(currentDesktop)) return true;
+  if (KNOWN_XDG_DESKTOP_VALUES.has(currentDesktop)) return true;
   // ubuntu based or derived session (default ubuntu one, communitheme…) supports
   // indicator too.
   if (/ubuntu/ig.test(currentDesktop)) return true;
@@ -197,7 +187,7 @@ app.on('window-all-closed', () => {
   }
 });
 
-const { setDefaultApplicationMenu } = require('@electron/internal/browser/default-menu');
+const { setDefaultApplicationMenu } = require('@electron/internal/browser/default-menu') as typeof defaultMenuModule;
 
 // Create default menu.
 //
@@ -205,11 +195,31 @@ const { setDefaultApplicationMenu } = require('@electron/internal/browser/defaul
 // menu is set before any user window is created.
 app.once('will-finish-launching', setDefaultApplicationMenu);
 
+const { appCodeLoaded } = process;
+delete process.appCodeLoaded;
+
 if (packagePath) {
   // Finally load app's main.js and transfer control to C++.
-  process._firstFileName = Module._resolveFilename(path.join(packagePath, mainStartupScript), null, false);
-  Module._load(path.join(packagePath, mainStartupScript), Module, true);
+  if ((packageJson.type === 'module' && !mainStartupScript.endsWith('.cjs')) || mainStartupScript.endsWith('.mjs')) {
+    const { runEntryPointWithESMLoader } = __non_webpack_require__('internal/modules/run_main');
+    const main = (require('url') as typeof url).pathToFileURL(path.join(packagePath, mainStartupScript));
+    runEntryPointWithESMLoader(async (cascadedLoader: any) => {
+      try {
+        await cascadedLoader.import(main.toString(), undefined, Object.create(null));
+        appCodeLoaded!();
+      } catch (err) {
+        appCodeLoaded!();
+        process.emit('uncaughtException', err as Error);
+      }
+    });
+  } else {
+    // Call appCodeLoaded before just for safety, it doesn't matter here as _load is synchronous
+    appCodeLoaded!();
+    process._firstFileName = Module._resolveFilename(path.join(packagePath, mainStartupScript), null, false);
+    Module._load(path.join(packagePath, mainStartupScript), Module, true);
+  }
 } else {
   console.error('Failed to locate a valid package to load (app, app.asar or default_app.asar)');
   console.error('This normally means you\'ve damaged the Electron package somehow');
+  appCodeLoaded!();
 }

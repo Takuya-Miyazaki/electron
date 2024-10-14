@@ -2,14 +2,22 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_COMMON_GIN_CONVERTERS_STD_CONVERTER_H_
-#define SHELL_COMMON_GIN_CONVERTERS_STD_CONVERTER_H_
+#ifndef ELECTRON_SHELL_COMMON_GIN_CONVERTERS_STD_CONVERTER_H_
+#define ELECTRON_SHELL_COMMON_GIN_CONVERTERS_STD_CONVERTER_H_
 
+#include <cstddef>
+#include <functional>
 #include <map>
 #include <set>
+#include <type_traits>
 #include <utility>
 
 #include "gin/converter.h"
+
+#include "base/strings/string_util.h"
+#if BUILDFLAG(IS_WIN)
+#include "base/strings/string_util_win.h"
+#endif
 
 namespace gin {
 
@@ -17,10 +25,10 @@ namespace gin {
 template <typename T>
 v8::Local<v8::Value> ConvertToV8(v8::Isolate* isolate, T&& input) {
   return Converter<typename std::remove_reference<T>::type>::ToV8(
-      isolate, std::move(input));
+      isolate, std::forward<T>(input));
 }
 
-#if !defined(OS_LINUX) && !defined(OS_FREEBSD)
+#if !BUILDFLAG(IS_LINUX)
 template <>
 struct Converter<unsigned long> {  // NOLINT(runtime/int)
   static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
@@ -82,7 +90,7 @@ struct Converter<v8::Local<v8::Array>> {
                      v8::Local<v8::Array>* out) {
     if (!val->IsArray())
       return false;
-    *out = v8::Local<v8::Array>::Cast(val);
+    *out = val.As<v8::Array>();
     return true;
   }
 };
@@ -98,7 +106,7 @@ struct Converter<v8::Local<v8::String>> {
                      v8::Local<v8::String>* out) {
     if (!val->IsString())
       return false;
-    *out = v8::Local<v8::String>::Cast(val);
+    *out = val.As<v8::String>();
     return true;
   }
 };
@@ -124,7 +132,7 @@ struct Converter<std::set<T>> {
 
     auto context = isolate->GetCurrentContext();
     std::set<T> result;
-    v8::Local<v8::Array> array(v8::Local<v8::Array>::Cast(val));
+    v8::Local<v8::Array> array = val.As<v8::Array>();
     uint32_t length = array->Length();
     for (uint32_t i = 0; i < length; ++i) {
       T item;
@@ -159,11 +167,11 @@ struct Converter<std::map<K, V>> {
       if (maybe_v8value.IsEmpty())
         return false;
       K key;
-      V value;
+      V out_value;
       if (!ConvertFromV8(isolate, v8key, &key) ||
-          !ConvertFromV8(isolate, maybe_v8value.ToLocalChecked(), &value))
+          !ConvertFromV8(isolate, maybe_v8value.ToLocalChecked(), &out_value))
         return false;
-      (*out)[key] = std::move(value);
+      (*out)[key] = std::move(out_value);
     }
     return true;
   }
@@ -182,6 +190,85 @@ struct Converter<std::map<K, V>> {
   }
 };
 
+#if BUILDFLAG(IS_WIN)
+template <>
+struct Converter<std::wstring> {
+  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
+                                   const std::wstring& val) {
+    return Converter<std::u16string>::ToV8(isolate, base::AsString16(val));
+  }
+  static bool FromV8(v8::Isolate* isolate,
+                     v8::Local<v8::Value> val,
+                     std::wstring* out) {
+    if (!val->IsString())
+      return false;
+
+    std::u16string str;
+    if (Converter<std::u16string>::FromV8(isolate, val, &str)) {
+      *out = base::AsWString(str);
+      return true;
+    } else {
+      return false;
+    }
+  }
+};
+#endif
+
+namespace detail {
+
+// Get a key from `key_val` and check `lookup` for a matching entry.
+// Return true iff a match is found, and set `*out` to the entry's value.
+template <typename KeyType, typename Out, typename Map>
+bool FromV8WithLookup(v8::Isolate* isolate,
+                      v8::Local<v8::Value> key_val,
+                      const Map& table,
+                      Out* out,
+                      std::function<void(KeyType&)> key_transform = {}) {
+  static_assert(std::is_same_v<typename Map::mapped_type, Out>);
+
+  auto key = KeyType{};
+  if (!ConvertFromV8(isolate, key_val, &key))
+    return false;
+
+  if (key_transform)
+    key_transform(key);
+
+  if (const auto* iter = table.find(key); iter != table.end()) {
+    *out = iter->second;
+    return true;
+  }
+
+  return false;
+}
+
+}  // namespace detail
+
+// Convert `key_val to a string key and check `lookup` for a matching entry.
+// Return true iff a match is found, and set `*out` to the entry's value.
+template <typename Out, typename Map>
+bool FromV8WithLookup(v8::Isolate* isolate,
+                      v8::Local<v8::Value> key_val,
+                      const Map& table,
+                      Out* out) {
+  return detail::FromV8WithLookup<std::string>(isolate, key_val, table, out);
+}
+
+// Convert `key_val` to a lowercase string key and check `lookup` for a matching
+// entry. Return true iff a match is found, and set `*out` to the entry's value.
+template <typename Out, typename Map>
+bool FromV8WithLowerLookup(v8::Isolate* isolate,
+                           v8::Local<v8::Value> key_val,
+                           const Map& table,
+                           Out* out) {
+  static constexpr auto to_lower_ascii_inplace = [](std::string& str) {
+    for (auto& ch : str)
+      ch = base::ToLowerASCII(ch);
+  };
+
+  return detail::FromV8WithLookup<std::string>(isolate, key_val, table, out,
+                                               to_lower_ascii_inplace);
+}
+
 }  // namespace gin
 
-#endif  // SHELL_COMMON_GIN_CONVERTERS_STD_CONVERTER_H_
+#endif  // ELECTRON_SHELL_COMMON_GIN_CONVERTERS_STD_CONVERTER_H_

@@ -2,8 +2,8 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_API_ELECTRON_API_DESKTOP_CAPTURER_H_
-#define SHELL_BROWSER_API_ELECTRON_API_DESKTOP_CAPTURER_H_
+#ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_DESKTOP_CAPTURER_H_
+#define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_DESKTOP_CAPTURER_H_
 
 #include <memory>
 #include <string>
@@ -11,16 +11,19 @@
 
 #include "chrome/browser/media/webrtc/desktop_media_list_observer.h"
 #include "chrome/browser/media/webrtc/native_desktop_media_list.h"
-#include "gin/handle.h"
 #include "gin/wrappable.h"
-#include "shell/common/gin_helper/dictionary.h"
+#include "shell/common/gin_helper/pinnable.h"
 
-namespace electron {
+namespace gin {
+template <typename T>
+class Handle;
+}  // namespace gin
 
-namespace api {
+namespace electron::api {
 
-class DesktopCapturer : public gin::Wrappable<DesktopCapturer>,
-                        public DesktopMediaListObserver {
+class DesktopCapturer final : public gin::Wrappable<DesktopCapturer>,
+                              public gin_helper::Pinnable<DesktopCapturer>,
+                              private DesktopMediaListObserver {
  public:
   struct Source {
     DesktopMediaList::Source media_list_source;
@@ -33,11 +36,7 @@ class DesktopCapturer : public gin::Wrappable<DesktopCapturer>,
 
   static gin::Handle<DesktopCapturer> Create(v8::Isolate* isolate);
 
-  static std::string GetMediaSourceIdForWebContents(
-      v8::Isolate* isolate,
-      gin_helper::ErrorThrower thrower,
-      int32_t request_web_contents_id,
-      int32_t web_contents_id);
+  static bool IsDisplayMediaSystemPickerAvailable();
 
   void StartHandling(bool capture_window,
                      bool capture_screen,
@@ -50,40 +49,70 @@ class DesktopCapturer : public gin::Wrappable<DesktopCapturer>,
       v8::Isolate* isolate) override;
   const char* GetTypeName() override;
 
+  // disable copy
+  DesktopCapturer(const DesktopCapturer&) = delete;
+  DesktopCapturer& operator=(const DesktopCapturer&) = delete;
+
  protected:
   explicit DesktopCapturer(v8::Isolate* isolate);
   ~DesktopCapturer() override;
 
-  // DesktopMediaListObserver:
-  void OnSourceAdded(DesktopMediaList* list, int index) override {}
-  void OnSourceRemoved(DesktopMediaList* list, int index) override {}
-  void OnSourceMoved(DesktopMediaList* list,
-                     int old_index,
-                     int new_index) override {}
-  void OnSourceNameChanged(DesktopMediaList* list, int index) override {}
-  void OnSourceThumbnailChanged(DesktopMediaList* list, int index) override {}
-  void OnSourceUnchanged(DesktopMediaList* list) override;
-
  private:
-  void UpdateSourcesList(DesktopMediaList* list);
+  // DesktopMediaListObserver:
+  void OnSourceAdded(int index) override {}
+  void OnSourceRemoved(int index) override {}
+  void OnSourceMoved(int old_index, int new_index) override {}
+  void OnSourceNameChanged(int index) override {}
+  void OnSourceThumbnailChanged(int index) override {}
+  void OnSourcePreviewChanged(size_t index) override {}
+  void OnDelegatedSourceListSelection() override {}
+  void OnDelegatedSourceListDismissed() override {}
 
+  using OnceCallback = base::OnceClosure;
+
+  class DesktopListListener : public DesktopMediaListObserver {
+   public:
+    DesktopListListener(OnceCallback update_callback,
+                        OnceCallback failure_callback,
+                        bool skip_thumbnails);
+    ~DesktopListListener() override;
+
+   protected:
+    void OnSourceAdded(int index) override {}
+    void OnSourceRemoved(int index) override {}
+    void OnSourceMoved(int old_index, int new_index) override {}
+    void OnSourceNameChanged(int index) override {}
+    void OnSourceThumbnailChanged(int index) override;
+    void OnSourcePreviewChanged(size_t index) override {}
+    void OnDelegatedSourceListSelection() override;
+    void OnDelegatedSourceListDismissed() override;
+
+   private:
+    OnceCallback update_callback_;
+    OnceCallback failure_callback_;
+    bool have_selection_ = false;
+    bool have_thumbnail_ = false;
+  };
+
+  void UpdateSourcesList(DesktopMediaList* list);
+  void HandleFailure();
+  void HandleSuccess();
+
+  std::unique_ptr<DesktopListListener> window_listener_;
+  std::unique_ptr<DesktopListListener> screen_listener_;
   std::unique_ptr<DesktopMediaList> window_capturer_;
   std::unique_ptr<DesktopMediaList> screen_capturer_;
   std::vector<DesktopCapturer::Source> captured_sources_;
   bool capture_window_ = false;
   bool capture_screen_ = false;
   bool fetch_window_icons_ = false;
-#if defined(OS_WIN)
+#if BUILDFLAG(IS_WIN)
   bool using_directx_capturer_ = false;
-#endif  // defined(OS_WIN)
+#endif  // BUILDFLAG(IS_WIN)
 
   base::WeakPtrFactory<DesktopCapturer> weak_ptr_factory_{this};
-
-  DISALLOW_COPY_AND_ASSIGN(DesktopCapturer);
 };
 
-}  // namespace api
+}  // namespace electron::api
 
-}  // namespace electron
-
-#endif  // SHELL_BROWSER_API_ELECTRON_API_DESKTOP_CAPTURER_H_
+#endif  // ELECTRON_SHELL_BROWSER_API_ELECTRON_API_DESKTOP_CAPTURER_H_

@@ -2,25 +2,27 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_API_ELECTRON_API_WEB_CONTENTS_VIEW_H_
-#define SHELL_BROWSER_API_ELECTRON_API_WEB_CONTENTS_VIEW_H_
+#ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_CONTENTS_VIEW_H_
+#define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_CONTENTS_VIEW_H_
 
+#include <optional>
+
+#include "base/memory/raw_ptr.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "shell/browser/api/electron_api_view.h"
+#include "shell/browser/draggable_region_provider.h"
 
 namespace gin_helper {
 class Dictionary;
 }
 
-namespace electron {
-
-class InspectableWebContents;
-
-namespace api {
+namespace electron::api {
 
 class WebContents;
 
-class WebContentsView : public View, public content::WebContentsObserver {
+class WebContentsView : public View,
+                        private content::WebContentsObserver,
+                        public DraggableRegionProvider {
  public:
   // Create a new instance of WebContentsView.
   static gin::Handle<WebContentsView> Create(
@@ -36,6 +38,10 @@ class WebContentsView : public View, public content::WebContentsObserver {
 
   // Public APIs.
   gin::Handle<WebContents> GetWebContents(v8::Isolate* isolate);
+  void SetBackgroundColor(std::optional<WrappedSkColor> color);
+  void SetBorderRadius(int radius);
+
+  int NonClientHitTest(const gfx::Point& point) override;
 
  protected:
   // Takes an existing WebContents.
@@ -45,20 +51,20 @@ class WebContentsView : public View, public content::WebContentsObserver {
   // content::WebContentsObserver:
   void WebContentsDestroyed() override;
 
+  // views::ViewObserver
+  void OnViewAddedToWidget(views::View* view) override;
+  void OnViewRemovedFromWidget(views::View* view) override;
+
  private:
-  static gin_helper::WrappableBase* New(
-      gin_helper::Arguments* args,
-      const gin_helper::Dictionary& web_preferences);
+  static gin_helper::WrappableBase* New(gin_helper::Arguments* args);
+
+  void ApplyBorderRadius();
 
   // Keep a reference to v8 wrapper.
   v8::Global<v8::Value> web_contents_;
-  api::WebContents* api_web_contents_;
-
-  DISALLOW_COPY_AND_ASSIGN(WebContentsView);
+  raw_ptr<api::WebContents> api_web_contents_;
 };
 
-}  // namespace api
+}  // namespace electron::api
 
-}  // namespace electron
-
-#endif  // SHELL_BROWSER_API_ELECTRON_API_WEB_CONTENTS_VIEW_H_
+#endif  // ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_CONTENTS_VIEW_H_

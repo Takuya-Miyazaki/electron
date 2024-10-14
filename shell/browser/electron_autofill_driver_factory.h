@@ -2,13 +2,13 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_ELECTRON_AUTOFILL_DRIVER_FACTORY_H_
-#define SHELL_BROWSER_ELECTRON_AUTOFILL_DRIVER_FACTORY_H_
+#ifndef ELECTRON_SHELL_BROWSER_ELECTRON_AUTOFILL_DRIVER_FACTORY_H_
+#define ELECTRON_SHELL_BROWSER_ELECTRON_AUTOFILL_DRIVER_FACTORY_H_
 
 #include <memory>
 #include <unordered_map>
 
-#include "base/callback_forward.h"
+#include "base/functional/callback_forward.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents_user_data.h"
 #include "shell/common/api/api.mojom.h"
@@ -18,7 +18,7 @@ namespace electron {
 class AutofillDriver;
 
 class AutofillDriverFactory
-    : public content::WebContentsObserver,
+    : private content::WebContentsObserver,
       public content::WebContentsUserData<AutofillDriverFactory> {
  public:
   typedef base::OnceCallback<std::unique_ptr<AutofillDriver>()>
@@ -27,13 +27,9 @@ class AutofillDriverFactory
   ~AutofillDriverFactory() override;
 
   static void BindAutofillDriver(
-      mojom::ElectronAutofillDriverAssociatedRequest request,
+      mojo::PendingAssociatedReceiver<mojom::ElectronAutofillDriver>
+          pending_receiver,
       content::RenderFrameHost* render_frame_host);
-
-  // content::WebContentsObserver:
-  void RenderFrameDeleted(content::RenderFrameHost* render_frame_host) override;
-  void DidFinishNavigation(
-      content::NavigationHandle* navigation_handle) override;
 
   AutofillDriver* DriverForFrame(content::RenderFrameHost* render_frame_host);
   void AddDriverForFrame(content::RenderFrameHost* render_frame_host,
@@ -45,6 +41,11 @@ class AutofillDriverFactory
   WEB_CONTENTS_USER_DATA_KEY_DECL();
 
  private:
+  // content::WebContentsObserver:
+  void RenderFrameDeleted(content::RenderFrameHost* render_frame_host) override;
+  void DidFinishNavigation(
+      content::NavigationHandle* navigation_handle) override;
+
   explicit AutofillDriverFactory(content::WebContents* web_contents);
   friend class content::WebContentsUserData<AutofillDriverFactory>;
 
@@ -54,4 +55,4 @@ class AutofillDriverFactory
 
 }  // namespace electron
 
-#endif  // SHELL_BROWSER_ELECTRON_AUTOFILL_DRIVER_FACTORY_H_
+#endif  // ELECTRON_SHELL_BROWSER_ELECTRON_AUTOFILL_DRIVER_FACTORY_H_

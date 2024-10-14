@@ -2,8 +2,8 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_API_ELECTRON_API_POWER_MONITOR_H_
-#define SHELL_BROWSER_API_ELECTRON_API_POWER_MONITOR_H_
+#ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_POWER_MONITOR_H_
+#define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_POWER_MONITOR_H_
 
 #include "base/power_monitor/power_observer.h"
 #include "gin/wrappable.h"
@@ -11,18 +11,18 @@
 #include "shell/common/gin_helper/pinnable.h"
 #include "ui/base/idle/idle.h"
 
-#if defined(OS_LINUX)
+#if BUILDFLAG(IS_LINUX)
 #include "shell/browser/lib/power_observer_linux.h"
 #endif
 
-namespace electron {
+namespace electron::api {
 
-namespace api {
-
-class PowerMonitor : public gin::Wrappable<PowerMonitor>,
-                     public gin_helper::EventEmitterMixin<PowerMonitor>,
-                     public gin_helper::Pinnable<PowerMonitor>,
-                     public base::PowerObserver {
+class PowerMonitor final : public gin::Wrappable<PowerMonitor>,
+                           public gin_helper::EventEmitterMixin<PowerMonitor>,
+                           public gin_helper::Pinnable<PowerMonitor>,
+                           private base::PowerStateObserver,
+                           private base::PowerSuspendObserver,
+                           private base::PowerThermalObserver {
  public:
   static v8::Local<v8::Value> Create(v8::Isolate* isolate);
 
@@ -32,27 +32,38 @@ class PowerMonitor : public gin::Wrappable<PowerMonitor>,
       v8::Isolate* isolate) override;
   const char* GetTypeName() override;
 
+  // disable copy
+  PowerMonitor(const PowerMonitor&) = delete;
+  PowerMonitor& operator=(const PowerMonitor&) = delete;
+
  private:
   explicit PowerMonitor(v8::Isolate* isolate);
   ~PowerMonitor() override;
 
-#if defined(OS_LINUX)
+#if BUILDFLAG(IS_LINUX)
   void SetListeningForShutdown(bool);
 #endif
 
   // Called by native calles.
   bool ShouldShutdown();
 
-#if defined(OS_MAC) || defined(OS_WIN)
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
   void InitPlatformSpecificMonitors();
 #endif
 
-  // base::PowerObserver implementations:
-  void OnPowerStateChange(bool on_battery_power) override;
+  // base::PowerStateObserver implementations:
+  void OnBatteryPowerStatusChange(
+      BatteryPowerStatus battery_power_status) override;
+
+  // base::PowerSuspendObserver implementations:
   void OnSuspend() override;
   void OnResume() override;
 
-#if defined(OS_WIN)
+  // base::PowerThermalObserver
+  void OnThermalStateChange(DeviceThermalState new_state) override;
+  void OnSpeedLimitChange(int speed_limit) override;
+
+#if BUILDFLAG(IS_WIN)
   // Static callback invoked when a message comes in to our messaging window.
   static LRESULT CALLBACK WndProcStatic(HWND hwnd,
                                         UINT message,
@@ -74,17 +85,11 @@ class PowerMonitor : public gin::Wrappable<PowerMonitor>,
   HWND window_;
 #endif
 
-#if defined(OS_LINUX)
+#if BUILDFLAG(IS_LINUX)
   PowerObserverLinux power_observer_linux_{this};
 #endif
-
-  v8::Global<v8::Value> pinned_;
-
-  DISALLOW_COPY_AND_ASSIGN(PowerMonitor);
 };
 
-}  // namespace api
+}  // namespace electron::api
 
-}  // namespace electron
-
-#endif  // SHELL_BROWSER_API_ELECTRON_API_POWER_MONITOR_H_
+#endif  // ELECTRON_SHELL_BROWSER_API_ELECTRON_API_POWER_MONITOR_H_

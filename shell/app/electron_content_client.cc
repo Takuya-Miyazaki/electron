@@ -5,73 +5,75 @@
 #include "shell/app/electron_content_client.h"
 
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "base/command_line.h"
 #include "base/files/file_util.h"
-#include "base/path_service.h"
 #include "base/strings/string_split.h"
-#include "base/strings/string_util.h"
-#include "base/strings/utf_string_conversions.h"
 #include "content/public/common/content_constants.h"
-#include "content/public/common/content_switches.h"
 #include "electron/buildflags/buildflags.h"
+#include "electron/fuses.h"
 #include "extensions/common/constants.h"
+#include "pdf/buildflags.h"
 #include "ppapi/buildflags/buildflags.h"
-#include "shell/common/electron_paths.h"
 #include "shell/common/options_switches.h"
+#include "shell/common/process_util.h"
+#include "third_party/widevine/cdm/buildflags.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/resource/resource_bundle.h"
 #include "url/url_constants.h"
 // In SHARED_INTERMEDIATE_DIR.
 #include "widevine_cdm_version.h"  // NOLINT(build/include_directory)
 
-#if defined(WIDEVINE_CDM_AVAILABLE)
+#if BUILDFLAG(ENABLE_WIDEVINE)
 #include "base/native_library.h"
 #include "content/public/common/cdm_info.h"
 #include "media/base/video_codecs.h"
-#endif  // defined(WIDEVINE_CDM_AVAILABLE)
+#endif  // BUILDFLAG(ENABLE_WIDEVINE)
 
 #if BUILDFLAG(ENABLE_PDF_VIEWER)
-#include "pdf/pdf.h"        // nogncheck
-#include "pdf/pdf_ppapi.h"  // nogncheck
+#include "components/pdf/common/constants.h"  // nogncheck
 #include "shell/common/electron_constants.h"
 #endif  // BUILDFLAG(ENABLE_PDF_VIEWER)
 
 #if BUILDFLAG(ENABLE_PLUGINS)
-#include "content/public/browser/plugin_service.h"
-#include "content/public/common/pepper_plugin_info.h"
-#include "ppapi/shared_impl/ppapi_permissions.h"
+#include "content/public/common/content_plugin_info.h"
 #endif  // BUILDFLAG(ENABLE_PLUGINS)
 
 namespace electron {
 
 namespace {
 
-#if defined(WIDEVINE_CDM_AVAILABLE)
+enum class WidevineCdmFileCheck {
+  kNotChecked,
+  kFound,
+  kNotFound,
+};
+
+#if BUILDFLAG(ENABLE_WIDEVINE)
 bool IsWidevineAvailable(
     base::FilePath* cdm_path,
     std::vector<media::VideoCodec>* codecs_supported,
     base::flat_set<media::CdmSessionType>* session_types_supported,
     base::flat_set<media::EncryptionMode>* modes_supported) {
-  static enum {
-    NOT_CHECKED,
-    FOUND,
-    NOT_FOUND,
-  } widevine_cdm_file_check = NOT_CHECKED;
+  static WidevineCdmFileCheck widevine_cdm_file_check =
+      WidevineCdmFileCheck::kNotChecked;
 
-  if (widevine_cdm_file_check == NOT_CHECKED) {
+  if (widevine_cdm_file_check == WidevineCdmFileCheck::kNotChecked) {
     base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
     *cdm_path = command_line->GetSwitchValuePath(switches::kWidevineCdmPath);
     if (!cdm_path->empty()) {
       *cdm_path = cdm_path->AppendASCII(
           base::GetNativeLibraryName(kWidevineCdmLibraryName));
-      widevine_cdm_file_check = base::PathExists(*cdm_path) ? FOUND : NOT_FOUND;
+      widevine_cdm_file_check = base::PathExists(*cdm_path)
+                                    ? WidevineCdmFileCheck::kFound
+                                    : WidevineCdmFileCheck::kNotFound;
     }
   }
 
-  if (widevine_cdm_file_check == FOUND) {
+  if (widevine_cdm_file_check == WidevineCdmFileCheck::kFound) {
     // Add the supported codecs as if they came from the component manifest.
     // This list must match the CDM that is being bundled with Chrome.
     codecs_supported->push_back(media::VideoCodec::kCodecVP8);
@@ -83,9 +85,9 @@ bool IsWidevineAvailable(
     // TODO(crbug.com/767941): Push persistent-license support info here once
     // we check in a new CDM that supports it on Linux.
     session_types_supported->insert(media::CdmSessionType::kTemporary);
-#if defined(OS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS)
     session_types_supported->insert(media::CdmSessionType::kPersistentLicense);
-#endif  // defined(OS_CHROMEOS)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
     modes_supported->insert(media::EncryptionMode::kCenc);
 
@@ -94,106 +96,14 @@ bool IsWidevineAvailable(
 
   return false;
 }
-#endif  // defined(WIDEVINE_CDM_AVAILABLE)
+#endif  // BUILDFLAG(ENABLE_WIDEVINE)
 
-#if BUILDFLAG(ENABLE_PEPPER_FLASH)
-content::PepperPluginInfo CreatePepperFlashInfo(const base::FilePath& path,
-                                                const std::string& version) {
-  content::PepperPluginInfo plugin;
-
-  plugin.is_out_of_process = true;
-  plugin.name = content::kFlashPluginName;
-  plugin.path = path;
-  plugin.permissions = ppapi::PERMISSION_ALL_BITS;
-
-  std::vector<std::string> flash_version_numbers = base::SplitString(
-      version, ".", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
-  if (flash_version_numbers.empty())
-    flash_version_numbers.emplace_back("11");
-  // |SplitString()| puts in an empty string given an empty string. :(
-  else if (flash_version_numbers[0].empty())
-    flash_version_numbers[0] = "11";
-  if (flash_version_numbers.size() < 2)
-    flash_version_numbers.emplace_back("2");
-  if (flash_version_numbers.size() < 3)
-    flash_version_numbers.emplace_back("999");
-  if (flash_version_numbers.size() < 4)
-    flash_version_numbers.emplace_back("999");
-  // E.g., "Shockwave Flash 10.2 r154":
-  plugin.description = plugin.name + " " + flash_version_numbers[0] + "." +
-                       flash_version_numbers[1] + " r" +
-                       flash_version_numbers[2];
-  plugin.version = base::JoinString(flash_version_numbers, ".");
-  plugin.mime_types.emplace_back(content::kFlashPluginSwfMimeType,
-                                 content::kFlashPluginSwfExtension,
-                                 content::kFlashPluginSwfDescription);
-  plugin.mime_types.emplace_back(content::kFlashPluginSplMimeType,
-                                 content::kFlashPluginSplExtension,
-                                 content::kFlashPluginSplDescription);
-
-  return plugin;
-}
-
-void AddPepperFlashFromCommandLine(
-    base::CommandLine* command_line,
-    std::vector<content::PepperPluginInfo>* plugins) {
-  base::FilePath flash_path =
-      command_line->GetSwitchValuePath(switches::kPpapiFlashPath);
-  if (flash_path.empty())
-    return;
-
-  auto flash_version =
-      command_line->GetSwitchValueASCII(switches::kPpapiFlashVersion);
-
-  plugins->push_back(CreatePepperFlashInfo(flash_path, flash_version));
-}
-#endif  // BUILDFLAG(ENABLE_PEPPER_FLASH)
-
-#if BUILDFLAG(ENABLE_PLUGINS)
-void ComputeBuiltInPlugins(std::vector<content::PepperPluginInfo>* plugins) {
-#if BUILDFLAG(ENABLE_PDF_VIEWER)
-  content::PepperPluginInfo pdf_info;
-  pdf_info.is_internal = true;
-  pdf_info.is_out_of_process = true;
-  pdf_info.name = "Chromium PDF Viewer";
-  pdf_info.description = "Portable Document Format";
-  // This isn't a real file path; it's just used as a unique identifier.
-  pdf_info.path = base::FilePath(kPdfPluginPath);
-  content::WebPluginMimeType pdf_mime_type(kPdfPluginMimeType, "pdf",
-                                           "Portable Document Format");
-  pdf_info.mime_types.push_back(pdf_mime_type);
-  pdf_info.internal_entry_points.get_interface = chrome_pdf::PPP_GetInterface;
-  pdf_info.internal_entry_points.initialize_module =
-      chrome_pdf::PPP_InitializeModule;
-  pdf_info.internal_entry_points.shutdown_module =
-      chrome_pdf::PPP_ShutdownModule;
-  pdf_info.permissions = ppapi::PERMISSION_PDF | ppapi::PERMISSION_DEV;
-  plugins->push_back(pdf_info);
-
-  // NB. in Chrome, this plugin isn't registered until the PDF extension is
-  // loaded. However, in Electron, we load the PDF extension unconditionally
-  // when it is enabled in the build, so we're OK to load the plugin eagerly
-  // here.
-  content::WebPluginInfo info;
-  info.type = content::WebPluginInfo::PLUGIN_TYPE_BROWSER_PLUGIN;
-  info.name = base::UTF8ToUTF16("Chromium PDF Viewer");
-  // This isn't a real file path; it's just used as a unique identifier.
-  info.path = base::FilePath::FromUTF8Unsafe(extension_misc::kPdfExtensionId);
-  info.background_color = content::WebPluginInfo::kDefaultBackgroundColor;
-  info.mime_types.emplace_back("application/pdf", "pdf",
-                               "Portable Document Format");
-  content::PluginService::GetInstance()->RefreshPlugins();
-  content::PluginService::GetInstance()->RegisterInternalPlugin(info, true);
-#endif  // BUILDFLAG(ENABLE_PDF_VIEWER)
-}
-#endif  // BUILDFLAG(ENABLE_PLUGINS)
-
-void AppendDelimitedSwitchToVector(const base::StringPiece cmd_switch,
+void AppendDelimitedSwitchToVector(const std::string_view cmd_switch,
                                    std::vector<std::string>* append_me) {
   auto* command_line = base::CommandLine::ForCurrentProcess();
   auto switch_value = command_line->GetSwitchValueASCII(cmd_switch);
   if (!switch_value.empty()) {
-    constexpr base::StringPiece delimiter(",", 1);
+    constexpr std::string_view delimiter{",", 1};
     auto tokens =
         base::SplitString(switch_value, delimiter, base::TRIM_WHITESPACE,
                           base::SPLIT_WANT_NONEMPTY);
@@ -209,13 +119,13 @@ ElectronContentClient::ElectronContentClient() = default;
 
 ElectronContentClient::~ElectronContentClient() = default;
 
-base::string16 ElectronContentClient::GetLocalizedString(int message_id) {
+std::u16string ElectronContentClient::GetLocalizedString(int message_id) {
   return l10n_util::GetStringUTF16(message_id);
 }
 
-base::StringPiece ElectronContentClient::GetDataResource(
+std::string_view ElectronContentClient::GetDataResource(
     int resource_id,
-    ui::ScaleFactor scale_factor) {
+    ui::ResourceScaleFactor scale_factor) {
   return ui::ResourceBundle::GetSharedInstance().GetRawDataResourceForScale(
       resource_id, scale_factor);
 }
@@ -232,16 +142,13 @@ base::RefCountedMemory* ElectronContentClient::GetDataResourceBytes(
 }
 
 void ElectronContentClient::AddAdditionalSchemes(Schemes* schemes) {
-  auto* command_line = base::CommandLine::ForCurrentProcess();
-  std::string process_type =
-      command_line->GetSwitchValueASCII(::switches::kProcessType);
   // Browser Process registration happens in
   // `api::Protocol::RegisterSchemesAsPrivileged`
   //
   // Renderer Process registration happens in `RendererClientBase`
   //
   // We use this for registration to network utility process
-  if (process_type == ::switches::kUtilityProcess) {
+  if (IsUtilityProcess()) {
     AppendDelimitedSwitchToVector(switches::kServiceWorkerSchemes,
                                   &schemes->service_worker_schemes);
     AppendDelimitedSwitchToVector(switches::kStandardSchemes,
@@ -254,26 +161,45 @@ void ElectronContentClient::AddAdditionalSchemes(Schemes* schemes) {
                                   &schemes->cors_enabled_schemes);
   }
 
-  schemes->service_worker_schemes.emplace_back(url::kFileScheme);
-  schemes->standard_schemes.emplace_back(extensions::kExtensionScheme);
+  if (electron::fuses::IsGrantFileProtocolExtraPrivilegesEnabled()) {
+    schemes->service_worker_schemes.emplace_back(url::kFileScheme);
+  }
+
+#if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+  schemes->standard_schemes.push_back(extensions::kExtensionScheme);
+  schemes->savable_schemes.push_back(extensions::kExtensionScheme);
+  schemes->secure_schemes.push_back(extensions::kExtensionScheme);
+  schemes->service_worker_schemes.push_back(extensions::kExtensionScheme);
+  schemes->cors_enabled_schemes.push_back(extensions::kExtensionScheme);
+  schemes->csp_bypassing_schemes.push_back(extensions::kExtensionScheme);
+#endif
 }
 
-void ElectronContentClient::AddPepperPlugins(
-    std::vector<content::PepperPluginInfo>* plugins) {
-#if BUILDFLAG(ENABLE_PEPPER_FLASH)
-  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-  AddPepperFlashFromCommandLine(command_line, plugins);
-#endif  // BUILDFLAG(ENABLE_PEPPER_FLASH)
-#if BUILDFLAG(ENABLE_PLUGINS)
-  ComputeBuiltInPlugins(plugins);
-#endif  // BUILDFLAG(ENABLE_PLUGINS)
+void ElectronContentClient::AddPlugins(
+    std::vector<content::ContentPluginInfo>* plugins) {
+#if BUILDFLAG(ENABLE_PDF_VIEWER)
+  static constexpr char kPDFPluginExtension[] = "pdf";
+  static constexpr char kPDFPluginDescription[] = "Portable Document Format";
+
+  content::ContentPluginInfo pdf_info;
+  pdf_info.is_internal = true;
+  pdf_info.is_out_of_process = true;
+  pdf_info.name = kPDFInternalPluginName;
+  pdf_info.description = kPDFPluginDescription;
+  // This isn't a real file path; it's just used as a unique identifier.
+  pdf_info.path = base::FilePath(kPdfPluginPath);
+  content::WebPluginMimeType pdf_mime_type(
+      pdf::kInternalPluginMimeType, kPDFPluginExtension, kPDFPluginDescription);
+  pdf_info.mime_types.push_back(pdf_mime_type);
+  plugins->push_back(pdf_info);
+#endif  // BUILDFLAG(ENABLE_PDF_VIEWER)
 }
 
 void ElectronContentClient::AddContentDecryptionModules(
     std::vector<content::CdmInfo>* cdms,
     std::vector<media::CdmHostFilePath>* cdm_host_file_paths) {
   if (cdms) {
-#if defined(WIDEVINE_CDM_AVAILABLE)
+#if BUILDFLAG(ENABLE_WIDEVINE)
     base::FilePath cdm_path;
     std::vector<media::VideoCodec> video_codecs_supported;
     base::flat_set<media::CdmSessionType> session_types_supported;
@@ -298,7 +224,7 @@ void ElectronContentClient::AddContentDecryptionModules(
           kWidevineCdmDisplayName, kWidevineCdmGuid, version, cdm_path,
           kWidevineCdmFileSystemId, capability, kWidevineKeySystem, false));
     }
-#endif  // defined(WIDEVINE_CDM_AVAILABLE)
+#endif  // BUILDFLAG(ENABLE_WIDEVINE)
   }
 }
 

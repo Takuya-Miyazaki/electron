@@ -2,7 +2,6 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#include <string>
 #include <utility>
 #include <vector>
 
@@ -18,6 +17,9 @@
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/promise.h"
 #include "shell/common/node_includes.h"
+#include "v8/include/v8-isolate.h"
+#include "v8/include/v8-local-handle.h"
+#include "v8/include/v8-promise.h"
 
 namespace {
 
@@ -30,7 +32,7 @@ void ResolvePromiseObject(gin_helper::Promise<gin_helper::Dictionary> promise,
                           bool checkbox_checked) {
   v8::Isolate* isolate = promise.isolate();
   v8::HandleScope handle_scope(isolate);
-  gin_helper::Dictionary dict = gin::Dictionary::CreateEmpty(isolate);
+  auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
 
   dict.Set("response", result);
   dict.Set("checkboxChecked", checkbox_checked);
@@ -92,12 +94,13 @@ void Initialize(v8::Local<v8::Object> exports,
   gin_helper::Dictionary dict(isolate, exports);
   dict.SetMethod("showMessageBoxSync", &ShowMessageBoxSync);
   dict.SetMethod("showMessageBox", &ShowMessageBox);
+  dict.SetMethod("_closeMessageBox", &electron::CloseMessageBox);
   dict.SetMethod("showErrorBox", &electron::ShowErrorBox);
   dict.SetMethod("showOpenDialogSync", &ShowOpenDialogSync);
   dict.SetMethod("showOpenDialog", &ShowOpenDialog);
   dict.SetMethod("showSaveDialogSync", &ShowSaveDialogSync);
   dict.SetMethod("showSaveDialog", &ShowSaveDialog);
-#if defined(OS_MAC) || defined(OS_WIN)
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
   dict.SetMethod("showCertificateTrustDialog",
                  &certificate_trust::ShowCertificateTrust);
 #endif
@@ -105,4 +108,4 @@ void Initialize(v8::Local<v8::Object> exports,
 
 }  // namespace
 
-NODE_LINKED_MODULE_CONTEXT_AWARE(electron_browser_dialog, Initialize)
+NODE_LINKED_BINDING_CONTEXT_AWARE(electron_browser_dialog, Initialize)

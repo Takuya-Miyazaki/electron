@@ -2,41 +2,43 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_API_ELECTRON_API_MENU_H_
-#define SHELL_BROWSER_API_ELECTRON_API_MENU_H_
+#ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_MENU_H_
+#define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_MENU_H_
 
 #include <memory>
 #include <string>
 
-#include "base/callback.h"
-#include "gin/arguments.h"
-#include "shell/browser/api/electron_api_base_window.h"
+#include "base/memory/raw_ptr.h"
 #include "shell/browser/event_emitter_mixin.h"
 #include "shell/browser/ui/electron_menu_model.h"
 #include "shell/common/gin_helper/constructible.h"
 #include "shell/common/gin_helper/pinnable.h"
 
-namespace electron {
+namespace gin {
+class Arguments;
+}  // namespace gin
 
-namespace api {
+namespace electron::api {
+
+class BaseWindow;
 
 class Menu : public gin::Wrappable<Menu>,
              public gin_helper::EventEmitterMixin<Menu>,
              public gin_helper::Constructible<Menu>,
              public gin_helper::Pinnable<Menu>,
              public ElectronMenuModel::Delegate,
-             public ElectronMenuModel::Observer {
+             private ElectronMenuModel::Observer {
  public:
   // gin_helper::Constructible
   static gin::Handle<Menu> New(gin::Arguments* args);
-  static v8::Local<v8::ObjectTemplate> FillObjectTemplate(
-      v8::Isolate*,
-      v8::Local<v8::ObjectTemplate>);
+  static void FillObjectTemplate(v8::Isolate*, v8::Local<v8::ObjectTemplate>);
+  static const char* GetClassName() { return "Menu"; }
 
   // gin::Wrappable
   static gin::WrapperInfo kWrapperInfo;
+  const char* GetTypeName() override;
 
-#if defined(OS_MAC)
+#if BUILDFLAG(IS_MAC)
   // Set the global menubar.
   static void SetApplicationMenu(Menu* menu);
 
@@ -45,6 +47,10 @@ class Menu : public gin::Wrappable<Menu>,
 #endif
 
   ElectronMenuModel* model() const { return model_.get(); }
+
+  // disable copy
+  Menu(const Menu&) = delete;
+  Menu& operator=(const Menu&) = delete;
 
  protected:
   explicit Menu(gin::Arguments* args);
@@ -64,6 +70,12 @@ class Menu : public gin::Wrappable<Menu>,
       bool use_default_accelerator,
       ui::Accelerator* accelerator) const override;
   bool ShouldRegisterAcceleratorForCommandId(int command_id) const override;
+#if BUILDFLAG(IS_MAC)
+  bool GetSharingItemForCommandId(
+      int command_id,
+      ElectronMenuModel::SharingItem* item) const override;
+  v8::Local<v8::Value> GetUserAcceleratorAt(int command_id) const;
+#endif
   void ExecuteCommand(int command_id, int event_flags) override;
   void OnMenuWillShow(ui::SimpleMenuModel* source) override;
 
@@ -71,53 +83,50 @@ class Menu : public gin::Wrappable<Menu>,
                        int x,
                        int y,
                        int positioning_item,
+                       ui::MenuSourceType source_type,
                        base::OnceClosure callback) = 0;
   virtual void ClosePopupAt(int32_t window_id) = 0;
+  virtual std::u16string GetAcceleratorTextAtForTesting(int index) const;
 
   std::unique_ptr<ElectronMenuModel> model_;
-  Menu* parent_ = nullptr;
+  raw_ptr<Menu> parent_ = nullptr;
 
   // Observable:
   void OnMenuWillClose() override;
   void OnMenuWillShow() override;
 
  private:
-  void InsertItemAt(int index, int command_id, const base::string16& label);
+  void InsertItemAt(int index, int command_id, const std::u16string& label);
   void InsertSeparatorAt(int index);
   void InsertCheckItemAt(int index,
                          int command_id,
-                         const base::string16& label);
+                         const std::u16string& label);
   void InsertRadioItemAt(int index,
                          int command_id,
-                         const base::string16& label,
+                         const std::u16string& label,
                          int group_id);
   void InsertSubMenuAt(int index,
                        int command_id,
-                       const base::string16& label,
+                       const std::u16string& label,
                        Menu* menu);
   void SetIcon(int index, const gfx::Image& image);
-  void SetSublabel(int index, const base::string16& sublabel);
-  void SetToolTip(int index, const base::string16& toolTip);
-  void SetRole(int index, const base::string16& role);
+  void SetSublabel(int index, const std::u16string& sublabel);
+  void SetToolTip(int index, const std::u16string& toolTip);
+  void SetRole(int index, const std::u16string& role);
   void Clear();
-  int GetIndexOfCommandId(int command_id);
+  int GetIndexOfCommandId(int command_id) const;
   int GetItemCount() const;
   int GetCommandIdAt(int index) const;
-  base::string16 GetLabelAt(int index) const;
-  base::string16 GetSublabelAt(int index) const;
-  base::string16 GetToolTipAt(int index) const;
-  base::string16 GetAcceleratorTextAt(int index) const;
+  std::u16string GetLabelAt(int index) const;
+  std::u16string GetSublabelAt(int index) const;
+  std::u16string GetToolTipAt(int index) const;
   bool IsItemCheckedAt(int index) const;
   bool IsEnabledAt(int index) const;
   bool IsVisibleAt(int index) const;
   bool WorksWhenHiddenAt(int index) const;
-
-  DISALLOW_COPY_AND_ASSIGN(Menu);
 };
 
-}  // namespace api
-
-}  // namespace electron
+}  // namespace electron::api
 
 namespace gin {
 
@@ -126,7 +135,7 @@ struct Converter<electron::ElectronMenuModel*> {
   static bool FromV8(v8::Isolate* isolate,
                      v8::Local<v8::Value> val,
                      electron::ElectronMenuModel** out) {
-    // null would be tranfered to NULL.
+    // null would be transferred to nullptr.
     if (val->IsNull()) {
       *out = nullptr;
       return true;
@@ -142,4 +151,4 @@ struct Converter<electron::ElectronMenuModel*> {
 
 }  // namespace gin
 
-#endif  // SHELL_BROWSER_API_ELECTRON_API_MENU_H_
+#endif  // ELECTRON_SHELL_BROWSER_API_ELECTRON_API_MENU_H_

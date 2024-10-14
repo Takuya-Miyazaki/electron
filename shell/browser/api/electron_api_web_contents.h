@@ -2,53 +2,53 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_BROWSER_API_ELECTRON_API_WEB_CONTENTS_H_
-#define SHELL_BROWSER_API_ELECTRON_API_WEB_CONTENTS_H_
+#ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_CONTENTS_H_
+#define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_CONTENTS_H_
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ptr_exclusion.h"
+#include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
-#include "base/observer_list_types.h"
-#include "content/common/cursors/webcursor.h"
-#include "content/common/frame.mojom.h"
+#include "base/task/thread_pool.h"
+#include "chrome/browser/devtools/devtools_file_system_indexer.h"
+#include "chrome/browser/ui/exclusive_access/exclusive_access_context.h"  // nogncheck
+#include "chrome/browser/ui/exclusive_access/exclusive_access_manager.h"
+#include "content/common/frame.mojom-forward.h"
+#include "content/public/browser/browser_thread.h"
 #include "content/public/browser/devtools_agent_host.h"
-#include "content/public/browser/keyboard_event_processing_result.h"
+#include "content/public/browser/frame_tree_node_id.h"
+#include "content/public/browser/javascript_dialog_manager.h"
 #include "content/public/browser/render_widget_host.h"
-#include "content/public/browser/web_contents.h"
+#include "content/public/browser/web_contents_delegate.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "electron/buildflags/buildflags.h"
 #include "electron/shell/common/api/api.mojom.h"
 #include "gin/handle.h"
 #include "gin/wrappable.h"
-#include "mojo/public/cpp/bindings/receiver_set.h"
 #include "printing/buildflags/buildflags.h"
-#include "services/service_manager/public/cpp/binder_registry.h"
-#include "shell/browser/api/frame_subscriber.h"
 #include "shell/browser/api/save_page_handler.h"
-#include "shell/browser/common_web_contents_delegate.h"
+#include "shell/browser/background_throttling_source.h"
 #include "shell/browser/event_emitter_mixin.h"
+#include "shell/browser/extended_web_contents_observer.h"
+#include "shell/browser/osr/osr_paint_event.h"
+#include "shell/browser/ui/inspectable_web_contents_delegate.h"
+#include "shell/browser/ui/inspectable_web_contents_view_delegate.h"
 #include "shell/common/gin_helper/cleaned_up_at_exit.h"
 #include "shell/common/gin_helper/constructible.h"
-#include "shell/common/gin_helper/error_thrower.h"
-#include "ui/gfx/image/image.h"
-
-#if BUILDFLAG(ENABLE_PRINTING)
-#include "chrome/browser/printing/print_view_manager_basic.h"
-#include "components/printing/common/print_messages.h"
-#include "printing/backend/print_backend.h"  // nogncheck
-#include "shell/browser/printing/print_preview_message_handler.h"
-
-#if defined(OS_WIN)
-#include "printing/backend/win_helper.h"
-#endif
-#endif
+#include "shell/common/gin_helper/pinnable.h"
+#include "ui/base/models/image_model.h"
 
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
-#include "extensions/common/view_type.h"
+#include "extensions/common/mojom/view_type.mojom-forward.h"
 
 namespace extensions {
 class ScriptExecutor;
@@ -57,106 +57,83 @@ class ScriptExecutor;
 
 namespace blink {
 struct DeviceEmulationParams;
+// enum class PermissionType;
+}  // namespace blink
+
+namespace content {
+enum class KeyboardEventProcessingResult;
+class WebContents;
+}  // namespace content
+
+namespace gin {
+class Arguments;
 }
 
 namespace gin_helper {
 class Dictionary;
-}
+class ErrorThrower;
+template <typename T>
+class Promise;
+}  // namespace gin_helper
 
 namespace network {
 class ResourceRequestBody;
 }
 
-namespace gin {
+namespace print_to_pdf {
+enum class PdfPrintResult;
+}  // namespace print_to_pdf
 
-class Arguments;
+namespace ui {
+class Cursor;
+}
 
-template <>
-struct Converter<base::TerminationStatus> {
-  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
-                                   const base::TerminationStatus& status) {
-    switch (status) {
-      case base::TERMINATION_STATUS_NORMAL_TERMINATION:
-        return gin::ConvertToV8(isolate, "clean-exit");
-      case base::TERMINATION_STATUS_ABNORMAL_TERMINATION:
-        return gin::ConvertToV8(isolate, "abnormal-exit");
-      case base::TERMINATION_STATUS_PROCESS_WAS_KILLED:
-        return gin::ConvertToV8(isolate, "killed");
-      case base::TERMINATION_STATUS_PROCESS_CRASHED:
-        return gin::ConvertToV8(isolate, "crashed");
-      case base::TERMINATION_STATUS_STILL_RUNNING:
-        return gin::ConvertToV8(isolate, "still-running");
-      case base::TERMINATION_STATUS_LAUNCH_FAILED:
-        return gin::ConvertToV8(isolate, "launch-failed");
-      case base::TERMINATION_STATUS_OOM:
-        return gin::ConvertToV8(isolate, "oom");
-#if defined(OS_WIN)
-      case base::TERMINATION_STATUS_INTEGRITY_FAILURE:
-        return gin::ConvertToV8(isolate, "integrity-failure");
-#endif
-      case base::TERMINATION_STATUS_MAX_ENUM:
-        NOTREACHED();
-        return gin::ConvertToV8(isolate, "");
-    }
-    NOTREACHED();
-    return gin::ConvertToV8(isolate, "");
-  }
-};
-
-}  // namespace gin
+class DevToolsEyeDropper;
+class SkRegion;
 
 namespace electron {
 
 class ElectronBrowserContext;
-class ElectronJavaScriptDialogManager;
 class InspectableWebContents;
 class WebContentsZoomController;
 class WebViewGuestDelegate;
-class FrameSubscriber;
-
-#if BUILDFLAG(ENABLE_OSR)
+class WebDialogHelper;
+class NativeWindow;
 class OffScreenRenderWidgetHostView;
-#endif
+class OffScreenWebContentsView;
 
 namespace api {
 
-// Certain events are only in WebContentsDelegate, provide our own Observer to
-// dispatch those events.
-class ExtendedWebContentsObserver : public base::CheckedObserver {
- public:
-  virtual void OnCloseContents() {}
-  virtual void OnDraggableRegionsUpdated(
-      const std::vector<mojom::DraggableRegionPtr>& regions) {}
-  virtual void OnSetContentBounds(const gfx::Rect& rect) {}
-  virtual void OnActivateContents() {}
-  virtual void OnPageTitleUpdated(const base::string16& title,
-                                  bool explicit_set) {}
-
- protected:
-  ~ExtendedWebContentsObserver() override {}
-};
+class BaseWindow;
+class FrameSubscriber;
 
 // Wrapper around the content::WebContents.
-class WebContents : public gin::Wrappable<WebContents>,
-                    public gin_helper::EventEmitterMixin<WebContents>,
-                    public gin_helper::Constructible<WebContents>,
-                    public gin_helper::CleanedUpAtExit,
-                    public CommonWebContentsDelegate,
-                    public content::WebContentsObserver,
-                    public mojom::ElectronBrowser {
+class WebContents final : public ExclusiveAccessContext,
+                          public gin::Wrappable<WebContents>,
+                          public gin_helper::EventEmitterMixin<WebContents>,
+                          public gin_helper::Constructible<WebContents>,
+                          public gin_helper::Pinnable<WebContents>,
+                          public gin_helper::CleanedUpAtExit,
+                          public content::WebContentsObserver,
+                          public content::WebContentsDelegate,
+                          private content::RenderWidgetHost::InputEventObserver,
+                          public content::JavaScriptDialogManager,
+                          public InspectableWebContentsDelegate,
+                          public InspectableWebContentsViewDelegate,
+                          public BackgroundThrottlingSource {
  public:
   enum class Type {
-    BACKGROUND_PAGE,  // An extension background page.
-    BROWSER_WINDOW,   // Used by BrowserWindow.
-    BROWSER_VIEW,     // Used by BrowserView.
-    REMOTE,           // Thin wrap around an existing WebContents.
-    WEB_VIEW,         // Used by <webview>.
-    OFF_SCREEN,       // Used for offscreen rendering
+    kBackgroundPage,  // An extension background page.
+    kBrowserWindow,   // Used by BrowserWindow.
+    kBrowserView,     // Used by the JS implementation of BrowserView for
+                      // backwards compatibility. Otherwise identical to
+                      // kBrowserWindow.
+    kRemote,          // Thin wrap around an existing WebContents.
+    kWebView,         // Used by <webview>.
+    kOffScreen,       // Used for offscreen rendering
   };
 
   // Create a new WebContents and return the V8 wrapper of it.
-  static gin::Handle<WebContents> Create(v8::Isolate* isolate,
-                                         const gin_helper::Dictionary& options);
   static gin::Handle<WebContents> New(v8::Isolate* isolate,
                                       const gin_helper::Dictionary& options);
 
@@ -172,6 +149,7 @@ class WebContents : public gin::Wrappable<WebContents>,
   // if there is no associated wrapper.
   static WebContents* From(content::WebContents* web_contents);
   static WebContents* FromID(int32_t id);
+  static std::list<WebContents*> GetWebContentsList();
 
   // Get the V8 wrapper of the |web_contents|, or create one if not existed.
   //
@@ -181,53 +159,61 @@ class WebContents : public gin::Wrappable<WebContents>,
       v8::Isolate* isolate,
       content::WebContents* web_contents);
 
+  static gin::Handle<WebContents> CreateFromWebPreferences(
+      v8::Isolate* isolate,
+      const gin_helper::Dictionary& web_preferences);
+
+  // gin_helper::Constructible
+  static void FillObjectTemplate(v8::Isolate*, v8::Local<v8::ObjectTemplate>);
+  static const char* GetClassName() { return "WebContents"; }
+
   // gin::Wrappable
   static gin::WrapperInfo kWrapperInfo;
-  static v8::Local<v8::ObjectTemplate> FillObjectTemplate(
-      v8::Isolate*,
-      v8::Local<v8::ObjectTemplate>);
   const char* GetTypeName() override;
 
+  void Destroy();
+  void Close(std::optional<gin_helper::Dictionary> options);
   base::WeakPtr<WebContents> GetWeakPtr() { return weak_factory_.GetWeakPtr(); }
 
-  // Destroy the managed content::WebContents instance.
-  //
-  // Note: The |async| should only be |true| when users are expecting to use the
-  // webContents immediately after the call. Always pass |false| if you are not
-  // sure.
-  // See https://github.com/electron/electron/issues/8930.
-  //
-  // Note: When destroying a webContents member inside a destructor, the |async|
-  // should always be |false|, otherwise the destroy task might be delayed after
-  // normal shutdown procedure, resulting in an assertion.
-  // The normal pattern for calling this method in destructor is:
-  // api_web_contents_->DestroyWebContents(!Browser::Get()->is_shutting_down())
-  // See https://github.com/electron/electron/issues/15133.
-  void DestroyWebContents(bool async);
+  // BackgroundThrottlingSource
+  bool GetBackgroundThrottling() const override;
 
-  bool GetBackgroundThrottling() const;
   void SetBackgroundThrottling(bool allowed);
   int GetProcessID() const;
   base::ProcessId GetOSProcessID() const;
-  base::ProcessId GetOSProcessIdForFrame(const std::string& name,
-                                         const std::string& document_url) const;
-  Type GetType() const;
+  [[nodiscard]] Type type() const { return type_; }
   bool Equal(const WebContents* web_contents) const;
   void LoadURL(const GURL& url, const gin_helper::Dictionary& options);
-  void DownloadURL(const GURL& url);
+  void Reload();
+  void ReloadIgnoringCache();
+  void DownloadURL(const GURL& url, gin::Arguments* args);
   GURL GetURL() const;
-  base::string16 GetTitle() const;
+  std::u16string GetTitle() const;
   bool IsLoading() const;
   bool IsLoadingMainFrame() const;
   bool IsWaitingForResponse() const;
   void Stop();
-  void ReloadIgnoringCache();
+  bool CanGoBack() const;
   void GoBack();
+  bool CanGoForward() const;
   void GoForward();
+  bool CanGoToOffset(int offset) const;
   void GoToOffset(int offset);
+  bool CanGoToIndex(int index) const;
+  void GoToIndex(int index);
+  int GetActiveIndex() const;
+  content::NavigationEntry* GetNavigationEntryAtIndex(int index) const;
+  bool RemoveNavigationEntryAtIndex(int index);
+  std::vector<content::NavigationEntry*> GetHistory() const;
+  void ClearHistory();
+  int GetHistoryLength() const;
   const std::string GetWebRTCIPHandlingPolicy() const;
   void SetWebRTCIPHandlingPolicy(const std::string& webrtc_ip_handling_policy);
+  v8::Local<v8::Value> GetWebRTCUDPPortRange(v8::Isolate* isolate) const;
+  void SetWebRTCUDPPortRange(gin::Arguments* args);
+  std::string GetMediaSourceID(content::WebContents* request_web_contents);
   bool IsCrashed() const;
+  void ForcefullyCrashRenderer();
   void SetUserAgent(const std::string& user_agent);
   std::string GetUserAgent();
   void InsertCSS(const std::string& css);
@@ -237,6 +223,8 @@ class WebContents : public gin::Wrappable<WebContents>,
   void CloseDevTools();
   bool IsDevToolsOpened();
   bool IsDevToolsFocused();
+  std::u16string GetDevToolsTitle();
+  void SetDevToolsTitle(const std::u16string& title);
   void ToggleDevTools();
   void EnableDeviceEmulation(const blink::DeviceEmulationParams& params);
   void DisableDeviceEmulation();
@@ -252,21 +240,16 @@ class WebContents : public gin::Wrappable<WebContents>,
   void SetEmbedder(const WebContents* embedder);
   void SetDevToolsWebContents(const WebContents* devtools);
   v8::Local<v8::Value> GetNativeView(v8::Isolate* isolate) const;
-  void IncrementCapturerCount(gin::Arguments* args);
-  void DecrementCapturerCount(gin::Arguments* args);
   bool IsBeingCaptured();
+  void HandleNewRenderFrame(content::RenderFrameHost* render_frame_host);
 
 #if BUILDFLAG(ENABLE_PRINTING)
-  void OnGetDefaultPrinter(base::Value print_settings,
-                           printing::CompletionCallback print_callback,
-                           base::string16 device_name,
-                           bool silent,
-                           base::string16 default_printer);
   void Print(gin::Arguments* args);
-  std::vector<printing::PrinterBasicInfo> GetPrinterList();
   // Print current page as PDF.
-  v8::Local<v8::Promise> PrintToPDF(base::DictionaryValue settings);
+  v8::Local<v8::Promise> PrintToPDF(const base::Value& settings);
 #endif
+
+  void SetNextChildWebPreferences(const gin_helper::Dictionary);
 
   // DevTools workspace api.
   void AddWorkSpace(gin::Arguments* args, const base::FilePath& path);
@@ -277,13 +260,17 @@ class WebContents : public gin::Wrappable<WebContents>,
   void Redo();
   void Cut();
   void Copy();
+  void CenterSelection();
   void Paste();
   void PasteAndMatchStyle();
   void Delete();
   void SelectAll();
   void Unselect();
-  void Replace(const base::string16& word);
-  void ReplaceMisspelling(const base::string16& word);
+  void ScrollToTopOfDocument();
+  void ScrollToBottomOfDocument();
+  void AdjustSelectionByCharacterOffset(gin::Arguments* args);
+  void Replace(const std::u16string& word);
+  void ReplaceMisspelling(const std::u16string& word);
   uint32_t FindInPage(gin::Arguments* args);
   void StopFindInPage(content::StopFindAction action);
   void ShowDefinitionForSelection();
@@ -292,29 +279,6 @@ class WebContents : public gin::Wrappable<WebContents>,
   // Focus.
   void Focus();
   bool IsFocused() const;
-  void TabTraverse(bool reverse);
-
-  // Send messages to browser.
-  bool SendIPCMessage(bool internal,
-                      bool send_to_all,
-                      const std::string& channel,
-                      v8::Local<v8::Value> args);
-
-  bool SendIPCMessageWithSender(bool internal,
-                                bool send_to_all,
-                                const std::string& channel,
-                                blink::CloneableMessage args,
-                                int32_t sender_id = 0);
-
-  bool SendIPCMessageToFrame(bool internal,
-                             bool send_to_all,
-                             int32_t frame_id,
-                             const std::string& channel,
-                             v8::Local<v8::Value> args);
-
-  void PostMessage(const std::string& channel,
-                   v8::Local<v8::Value> message,
-                   base::Optional<v8::Local<v8::Value>> transfer);
 
   // Send WebInputEvent to the page.
   void SendInputEvent(v8::Isolate* isolate, v8::Local<v8::Value> input_event);
@@ -331,21 +295,21 @@ class WebContents : public gin::Wrappable<WebContents>,
   v8::Local<v8::Promise> CapturePage(gin::Arguments* args);
 
   // Methods for creating <webview>.
-  bool IsGuest() const;
+  [[nodiscard]] bool is_guest() const { return type_ == Type::kWebView; }
   void AttachToIframe(content::WebContents* embedder_web_contents,
                       int embedder_frame_id);
   void DetachFromOuterFrame();
 
   // Methods for offscreen rendering
   bool IsOffScreen() const;
-#if BUILDFLAG(ENABLE_OSR)
-  void OnPaint(const gfx::Rect& dirty_rect, const SkBitmap& bitmap);
+  void OnPaint(const gfx::Rect& dirty_rect,
+               const SkBitmap& bitmap,
+               const OffscreenSharedTexture& info);
   void StartPainting();
   void StopPainting();
   bool IsPainting() const;
   void SetFrameRate(int frame_rate);
   int GetFrameRate() const;
-#endif
   void Invalidate();
   gfx::Size GetSizeForNewRenderView(content::WebContents*) override;
 
@@ -370,24 +334,24 @@ class WebContents : public gin::Wrappable<WebContents>,
                       const scoped_refptr<network::ResourceRequestBody>& body);
 
   // Returns the preload script path of current WebContents.
-  std::vector<base::FilePath::StringType> GetPreloadPaths() const;
+  std::vector<base::FilePath> GetPreloadPaths() const;
 
   // Returns the web preferences of current WebContents.
-  v8::Local<v8::Value> GetWebPreferences(v8::Isolate* isolate) const;
   v8::Local<v8::Value> GetLastWebPreferences(v8::Isolate* isolate) const;
 
   // Returns the owner window.
   v8::Local<v8::Value> GetOwnerBrowserWindow(v8::Isolate* isolate) const;
-
-  // Grants the child process the capability to access URLs with the origin of
-  // the specified URL.
-  void GrantOriginAccess(const GURL& url);
 
   // Notifies the web page that there is user interaction.
   void NotifyUserActivation();
 
   v8::Local<v8::Promise> TakeHeapSnapshot(v8::Isolate* isolate,
                                           const base::FilePath& file_path);
+  v8::Local<v8::Promise> GetProcessMemoryInfo(v8::Isolate* isolate);
+
+  // content::WebContentsDelegate:
+  bool HandleContextMenu(content::RenderFrameHost& render_frame_host,
+                         const content::ContextMenuParams& params) override;
 
   // Properties.
   int32_t ID() const { return id_; }
@@ -395,7 +359,8 @@ class WebContents : public gin::Wrappable<WebContents>,
   content::WebContents* HostWebContents() const;
   v8::Local<v8::Value> DevToolsWebContents(v8::Isolate* isolate);
   v8::Local<v8::Value> Debugger(v8::Isolate* isolate);
-  bool WasInitiallyShown();
+  content::RenderFrameHost* MainFrame();
+  content::RenderFrameHost* Opener();
 
   WebContentsZoomController* GetZoomController() { return zoom_controller_; }
 
@@ -404,7 +369,7 @@ class WebContents : public gin::Wrappable<WebContents>,
   }
   void RemoveObserver(ExtendedWebContentsObserver* obs) {
     // Trying to remove from an empty collection leads to an access violation
-    if (observers_.might_have_observers())
+    if (!observers_.empty())
       observers_.RemoveObserver(obs);
   }
 
@@ -413,22 +378,26 @@ class WebContents : public gin::Wrappable<WebContents>,
 
   // this.emit(name, new Event(sender, message), args...);
   template <typename... Args>
-  bool EmitWithSender(base::StringPiece name,
-                      content::RenderFrameHost* sender,
-                      electron::mojom::ElectronBrowser::InvokeCallback callback,
+  bool EmitWithSender(const std::string_view name,
+                      content::RenderFrameHost* frame,
+                      electron::mojom::ElectronApiIPC::InvokeCallback callback,
                       Args&&... args) {
     DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
     v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
     v8::HandleScope handle_scope(isolate);
-    v8::Local<v8::Object> wrapper;
-    if (!GetWrapper(isolate).ToLocal(&wrapper))
+
+    gin::Handle<gin_helper::internal::Event> event =
+        MakeEventWithSender(isolate, frame, std::move(callback));
+    if (event.IsEmpty())
       return false;
-    v8::Local<v8::Object> event = gin_helper::internal::CreateNativeEvent(
-        isolate, wrapper, sender, std::move(callback));
-    return EmitCustomEvent(name, event, std::forward<Args>(args)...);
+    EmitWithoutEvent(name, event, std::forward<Args>(args)...);
+    return event->GetDefaultPrevented();
   }
 
-  void MarkDestroyed();
+  gin::Handle<gin_helper::internal::Event> MakeEventWithSender(
+      v8::Isolate* isolate,
+      content::RenderFrameHost* frame,
+      electron::mojom::ElectronApiIPC::InvokeCallback callback);
 
   WebContents* embedder() { return embedder_; }
 
@@ -438,7 +407,97 @@ class WebContents : public gin::Wrappable<WebContents>,
   }
 #endif
 
- protected:
+  // Set the window as owner window.
+  void SetOwnerWindow(NativeWindow* owner_window);
+  void SetOwnerWindow(content::WebContents* web_contents,
+                      NativeWindow* owner_window);
+  void SetOwnerBaseWindow(std::optional<BaseWindow*> owner_window);
+
+  // Returns the WebContents managed by this delegate.
+  content::WebContents* GetWebContents() const;
+
+  // Returns the WebContents of devtools.
+  content::WebContents* GetDevToolsWebContents() const;
+
+  InspectableWebContents* inspectable_web_contents() const {
+    return inspectable_web_contents_.get();
+  }
+
+  NativeWindow* owner_window() const { return owner_window_.get(); }
+
+  bool is_html_fullscreen() const { return html_fullscreen_; }
+
+  void set_fullscreen_frame(content::RenderFrameHost* rfh) {
+    fullscreen_frame_ = rfh;
+  }
+
+  // mojom::ElectronApiIPC
+  void Message(bool internal,
+               const std::string& channel,
+               blink::CloneableMessage arguments,
+               content::RenderFrameHost* render_frame_host);
+  void Invoke(bool internal,
+              const std::string& channel,
+              blink::CloneableMessage arguments,
+              electron::mojom::ElectronApiIPC::InvokeCallback callback,
+              content::RenderFrameHost* render_frame_host);
+  void ReceivePostMessage(const std::string& channel,
+                          blink::TransferableMessage message,
+                          content::RenderFrameHost* render_frame_host);
+  void MessageSync(
+      bool internal,
+      const std::string& channel,
+      blink::CloneableMessage arguments,
+      electron::mojom::ElectronApiIPC::MessageSyncCallback callback,
+      content::RenderFrameHost* render_frame_host);
+  void MessageHost(const std::string& channel,
+                   blink::CloneableMessage arguments,
+                   content::RenderFrameHost* render_frame_host);
+
+  // mojom::ElectronWebContentsUtility
+  void OnFirstNonEmptyLayout(content::RenderFrameHost* render_frame_host);
+  void SetTemporaryZoomLevel(double level);
+  void DoGetZoomLevel(
+      electron::mojom::ElectronWebContentsUtility::DoGetZoomLevelCallback
+          callback);
+
+  void SetImageAnimationPolicy(const std::string& new_policy);
+
+  // content::RenderWidgetHost::InputEventObserver:
+  void OnInputEvent(const blink::WebInputEvent& event) override;
+
+  // content::JavaScriptDialogManager:
+  void RunJavaScriptDialog(content::WebContents* web_contents,
+                           content::RenderFrameHost* rfh,
+                           content::JavaScriptDialogType dialog_type,
+                           const std::u16string& message_text,
+                           const std::u16string& default_prompt_text,
+                           DialogClosedCallback callback,
+                           bool* did_suppress_message) override;
+  void RunBeforeUnloadDialog(content::WebContents* web_contents,
+                             content::RenderFrameHost* rfh,
+                             bool is_reload,
+                             DialogClosedCallback callback) override;
+  void CancelDialogs(content::WebContents* web_contents,
+                     bool reset_state) override;
+
+  void SetBackgroundColor(std::optional<SkColor> color);
+
+  void PDFReadyToPrint();
+
+  SkRegion* draggable_region() {
+    return force_non_draggable_ ? nullptr : draggable_region_.get();
+  }
+
+  void SetForceNonDraggable(bool force_non_draggable) {
+    force_non_draggable_ = force_non_draggable;
+  }
+
+  // disable copy
+  WebContents(const WebContents&) = delete;
+  WebContents& operator=(const WebContents&) = delete;
+
+ private:
   // Does not manage lifetime of |web_contents|.
   WebContents(v8::Isolate* isolate, content::WebContents* web_contents);
   // Takes over ownership of |web_contents|.
@@ -449,6 +508,15 @@ class WebContents : public gin::Wrappable<WebContents>,
   WebContents(v8::Isolate* isolate, const gin_helper::Dictionary& options);
   ~WebContents() override;
 
+  // Delete this if garbage collection has not started.
+  void DeleteThisIfAlive();
+
+  // Creates a InspectableWebContents object and takes ownership of
+  // |web_contents|.
+  void InitWithWebContents(std::unique_ptr<content::WebContents> web_contents,
+                           ElectronBrowserContext* browser_context,
+                           bool is_guest);
+
   void InitWithSessionAndOptions(
       v8::Isolate* isolate,
       std::unique_ptr<content::WebContents> web_contents,
@@ -458,21 +526,20 @@ class WebContents : public gin::Wrappable<WebContents>,
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
   void InitWithExtensionView(v8::Isolate* isolate,
                              content::WebContents* web_contents,
-                             extensions::ViewType view_type);
+                             extensions::mojom::ViewType view_type);
 #endif
 
   // content::WebContentsDelegate:
   bool DidAddMessageToConsole(content::WebContents* source,
                               blink::mojom::ConsoleMessageLevel level,
-                              const base::string16& message,
+                              const std::u16string& message,
                               int32_t line_no,
-                              const base::string16& source_id) override;
+                              const std::u16string& source_id) override;
   bool IsWebContentsCreationOverridden(
       content::SiteInstance* source_site_instance,
       content::mojom::WindowContainerType window_container_type,
       const GURL& opener_url,
-      const std::string& frame_name,
-      const GURL& target_url) override;
+      const content::mojom::CreateNewWindowParams& params) override;
   content::WebContents* CreateCustomWebContents(
       content::RenderFrameHost* opener,
       content::SiteInstance* source_site_instance,
@@ -480,7 +547,7 @@ class WebContents : public gin::Wrappable<WebContents>,
       const GURL& opener_url,
       const std::string& frame_name,
       const GURL& target_url,
-      const std::string& partition_id,
+      const content::StoragePartitionConfig& partition_config,
       content::SessionStorageNamespace* session_storage_namespace) override;
   void WebContentsCreatedWithFullParams(
       content::WebContents* source_contents,
@@ -488,16 +555,19 @@ class WebContents : public gin::Wrappable<WebContents>,
       int opener_render_frame_id,
       const content::mojom::CreateNewWindowParams& params,
       content::WebContents* new_contents) override;
-  void AddNewContents(content::WebContents* source,
-                      std::unique_ptr<content::WebContents> new_contents,
-                      const GURL& target_url,
-                      WindowOpenDisposition disposition,
-                      const gfx::Rect& initial_rect,
-                      bool user_gesture,
-                      bool* was_blocked) override;
+  content::WebContents* AddNewContents(
+      content::WebContents* source,
+      std::unique_ptr<content::WebContents> new_contents,
+      const GURL& target_url,
+      WindowOpenDisposition disposition,
+      const blink::mojom::WindowFeatures& window_features,
+      bool user_gesture,
+      bool* was_blocked) override;
   content::WebContents* OpenURLFromTab(
       content::WebContents* source,
-      const content::OpenURLParams& params) override;
+      const content::OpenURLParams& params,
+      base::OnceCallback<void(content::NavigationHandle&)>
+          navigation_handle_callback) override;
   void BeforeUnloadFired(content::WebContents* tab,
                          bool proceed,
                          bool* proceed_to_fire_unload) override;
@@ -506,12 +576,13 @@ class WebContents : public gin::Wrappable<WebContents>,
   void CloseContents(content::WebContents* source) override;
   void ActivateContents(content::WebContents* contents) override;
   void UpdateTargetURL(content::WebContents* source, const GURL& url) override;
-  bool HandleKeyboardEvent(
-      content::WebContents* source,
-      const content::NativeWebKeyboardEvent& event) override;
+  bool HandleKeyboardEvent(content::WebContents* source,
+                           const input::NativeWebKeyboardEvent& event) override;
+  bool PlatformHandleKeyboardEvent(content::WebContents* source,
+                                   const input::NativeWebKeyboardEvent& event);
   content::KeyboardEventProcessingResult PreHandleKeyboardEvent(
       content::WebContents* source,
-      const content::NativeWebKeyboardEvent& event) override;
+      const input::NativeWebKeyboardEvent& event) override;
   void ContentsZoomChange(bool zoom_in) override;
   void EnterFullscreenModeForTab(
       content::RenderFrameHost* requesting_frame,
@@ -524,42 +595,53 @@ class WebContents : public gin::Wrappable<WebContents>,
   void RendererResponsive(
       content::WebContents* source,
       content::RenderWidgetHost* render_widget_host) override;
-  bool HandleContextMenu(content::RenderFrameHost* render_frame_host,
-                         const content::ContextMenuParams& params) override;
-  bool OnGoToEntryOffset(int offset) override;
   void FindReply(content::WebContents* web_contents,
                  int request_id,
                  int number_of_matches,
                  const gfx::Rect& selection_rect,
                  int active_match_ordinal,
                  bool final_update) override;
+  void OnRequestPointerLock(content::WebContents* web_contents,
+                            bool user_gesture,
+                            bool last_unlocked_by_target,
+                            bool allowed);
+  void RequestPointerLock(content::WebContents* web_contents,
+                          bool user_gesture,
+                          bool last_unlocked_by_target) override;
+  void LostPointerLock() override;
+  void OnRequestKeyboardLock(content::WebContents* web_contents,
+                             bool esc_key_locked,
+                             bool allowed);
+  void RequestKeyboardLock(content::WebContents* web_contents,
+                           bool esc_key_locked) override;
+  void CancelKeyboardLockRequest(content::WebContents* web_contents) override;
   bool CheckMediaAccessPermission(content::RenderFrameHost* render_frame_host,
-                                  const GURL& security_origin,
+                                  const url::Origin& security_origin,
                                   blink::mojom::MediaStreamType type) override;
   void RequestMediaAccessPermission(
       content::WebContents* web_contents,
       const content::MediaStreamRequest& request,
       content::MediaResponseCallback callback) override;
-  void RequestToLockMouse(content::WebContents* web_contents,
-                          bool user_gesture,
-                          bool last_unlocked_by_target) override;
-  std::unique_ptr<content::BluetoothChooser> RunBluetoothChooser(
-      content::RenderFrameHost* frame,
-      const content::BluetoothChooser::EventHandler& handler) override;
   content::JavaScriptDialogManager* GetJavaScriptDialogManager(
       content::WebContents* source) override;
   void OnAudioStateChanged(bool audible) override;
+  void UpdatePreferredSize(content::WebContents* web_contents,
+                           const gfx::Size& pref_size) override;
+  void DraggableRegionsChanged(
+      const std::vector<blink::mojom::DraggableRegionPtr>& regions,
+      content::WebContents* contents) override;
 
   // content::WebContentsObserver:
-  void BeforeUnloadFired(bool proceed,
-                         const base::TimeTicks& proceed_time) override;
-  void RenderViewCreated(content::RenderViewHost* render_view_host) override;
+  void BeforeUnloadFired(bool proceed) override;
+  void OnBackgroundColorChanged() override;
   void RenderFrameCreated(content::RenderFrameHost* render_frame_host) override;
-  void RenderViewHostChanged(content::RenderViewHost* old_host,
-                             content::RenderViewHost* new_host) override;
-  void RenderViewDeleted(content::RenderViewHost*) override;
-  void RenderProcessGone(base::TerminationStatus status) override;
   void RenderFrameDeleted(content::RenderFrameHost* render_frame_host) override;
+  void RenderFrameHostChanged(content::RenderFrameHost* old_host,
+                              content::RenderFrameHost* new_host) override;
+  void FrameDeleted(content::FrameTreeNodeId frame_tree_node_id) override;
+  void RenderViewDeleted(content::RenderViewHost*) override;
+  void PrimaryMainFrameRenderProcessGone(
+      base::TerminationStatus status) override;
   void DOMContentLoaded(content::RenderFrameHost* render_frame_host) override;
   void DidFinishLoad(content::RenderFrameHost* render_frame_host,
                      const GURL& validated_url) override;
@@ -572,9 +654,10 @@ class WebContents : public gin::Wrappable<WebContents>,
       content::NavigationHandle* navigation_handle) override;
   void DidRedirectNavigation(
       content::NavigationHandle* navigation_handle) override;
+  void ReadyToCommitNavigation(
+      content::NavigationHandle* navigation_handle) override;
   void DidFinishNavigation(
       content::NavigationHandle* navigation_handle) override;
-  bool OnMessageReceived(const IPC::Message& message) override;
   void WebContentsDestroyed() override;
   void NavigationEntryCommitted(
       const content::LoadCommittedDetails& load_details) override;
@@ -591,12 +674,12 @@ class WebContents : public gin::Wrappable<WebContents>,
       const content::MediaPlayerId& id,
       content::WebContentsObserver::MediaStoppedReason reason) override;
   void DidChangeThemeColor() override;
-  void OnInterfaceRequestFromFrame(
-      content::RenderFrameHost* render_frame_host,
-      const std::string& interface_name,
-      mojo::ScopedMessagePipeHandle* interface_pipe) override;
-  void OnCursorChanged(const content::WebCursor& cursor) override;
+  void OnCursorChanged(const ui::Cursor& cursor) override;
   void DidAcquireFullscreen(content::RenderFrameHost* rfh) override;
+  void OnWebContentsFocused(
+      content::RenderWidgetHost* render_widget_host) override;
+  void OnWebContentsLostFocus(
+      content::RenderWidgetHost* render_widget_host) override;
 
   // InspectableWebContentsDelegate:
   void DevToolsReloadPage() override;
@@ -605,49 +688,14 @@ class WebContents : public gin::Wrappable<WebContents>,
   void DevToolsFocused() override;
   void DevToolsOpened() override;
   void DevToolsClosed() override;
+  void DevToolsResized() override;
 
- private:
   ElectronBrowserContext* GetBrowserContext() const;
 
-  // Binds the given request for the ElectronBrowser API. When the
-  // RenderFrameHost is destroyed, all related bindings will be removed.
-  void BindElectronBrowser(
-      mojo::PendingReceiver<mojom::ElectronBrowser> receiver,
-      content::RenderFrameHost* render_frame_host);
   void OnElectronBrowserConnectionError();
 
-  uint32_t GetNextRequestId() { return ++request_id_; }
-
-#if BUILDFLAG(ENABLE_OSR)
-  OffScreenWebContentsView* GetOffScreenWebContentsView() const override;
+  OffScreenWebContentsView* GetOffScreenWebContentsView() const;
   OffScreenRenderWidgetHostView* GetOffScreenRenderWidgetHostView() const;
-#endif
-
-  // mojom::ElectronBrowser
-  void Message(bool internal,
-               const std::string& channel,
-               blink::CloneableMessage arguments) override;
-  void Invoke(bool internal,
-              const std::string& channel,
-              blink::CloneableMessage arguments,
-              InvokeCallback callback) override;
-  void ReceivePostMessage(const std::string& channel,
-                          blink::TransferableMessage message) override;
-  void MessageSync(bool internal,
-                   const std::string& channel,
-                   blink::CloneableMessage arguments,
-                   MessageSyncCallback callback) override;
-  void MessageTo(bool internal,
-                 bool send_to_all,
-                 int32_t web_contents_id,
-                 const std::string& channel,
-                 blink::CloneableMessage arguments) override;
-  void MessageHost(const std::string& channel,
-                   blink::CloneableMessage arguments) override;
-  void UpdateDraggableRegions(
-      std::vector<mojom::DraggableRegionPtr> regions) override;
-  void SetTemporaryZoomLevel(double level) override;
-  void DoGetZoomLevel(DoGetZoomLevelCallback callback) override;
 
   // Called when received a synchronous message from renderer to
   // get the zoom level.
@@ -657,11 +705,98 @@ class WebContents : public gin::Wrappable<WebContents>,
   void InitZoomController(content::WebContents* web_contents,
                           const gin_helper::Dictionary& options);
 
+  // content::WebContentsDelegate:
+  bool CanOverscrollContent() override;
+  std::unique_ptr<content::EyeDropper> OpenEyeDropper(
+      content::RenderFrameHost* frame,
+      content::EyeDropperListener* listener) override;
+  void RunFileChooser(content::RenderFrameHost* render_frame_host,
+                      scoped_refptr<content::FileSelectListener> listener,
+                      const blink::mojom::FileChooserParams& params) override;
+  void EnumerateDirectory(content::WebContents* web_contents,
+                          scoped_refptr<content::FileSelectListener> listener,
+                          const base::FilePath& path) override;
+
+  // ExclusiveAccessContext:
+  Profile* GetProfile() override;
+  bool IsFullscreen() const override;
+  void EnterFullscreen(const GURL& url,
+                       ExclusiveAccessBubbleType bubble_type,
+                       const int64_t display_id) override;
+  void ExitFullscreen() override {}
+  void UpdateExclusiveAccessBubble(
+      const ExclusiveAccessBubbleParams& params,
+      ExclusiveAccessBubbleHideCallback bubble_first_hide_callback) override {}
+  void OnExclusiveAccessUserInput() override {}
+  content::WebContents* GetWebContentsForExclusiveAccess() override;
+  bool CanUserExitFullscreen() const override;
+  bool IsExclusiveAccessBubbleDisplayed() const override;
+
+  // content::WebContentsDelegate
+  bool IsFullscreenForTabOrPending(const content::WebContents* source) override;
+  content::FullscreenState GetFullscreenState(
+      const content::WebContents* web_contents) const override;
+  bool TakeFocus(content::WebContents* source, bool reverse) override;
+  content::PictureInPictureResult EnterPictureInPicture(
+      content::WebContents* web_contents) override;
+  void ExitPictureInPicture() override;
+
+  // InspectableWebContentsDelegate:
+  void DevToolsSaveToFile(const std::string& url,
+                          const std::string& content,
+                          bool save_as,
+                          bool is_base64) override;
+  void DevToolsAppendToFile(const std::string& url,
+                            const std::string& content) override;
+  void DevToolsRequestFileSystems() override;
+  void DevToolsAddFileSystem(const std::string& type,
+                             const base::FilePath& file_system_path) override;
+  void DevToolsRemoveFileSystem(
+      const base::FilePath& file_system_path) override;
+  void DevToolsIndexPath(int request_id,
+                         const std::string& file_system_path,
+                         const std::string& excluded_folders_message) override;
+  void DevToolsOpenInNewTab(const std::string& url) override;
+  void DevToolsOpenSearchResultsInNewTab(const std::string& query) override;
+  void DevToolsStopIndexing(int request_id) override;
+  void DevToolsSearchInPath(int request_id,
+                            const std::string& file_system_path,
+                            const std::string& query) override;
+  void DevToolsSetEyeDropperActive(bool active) override;
+
+  // InspectableWebContentsViewDelegate:
+#if defined(TOOLKIT_VIEWS) && !BUILDFLAG(IS_MAC)
+  ui::ImageModel GetDevToolsWindowIcon() override;
+#endif
+#if BUILDFLAG(IS_LINUX)
+  void GetDevToolsWindowWMClass(std::string* name,
+                                std::string* class_name) override;
+#endif
+
+  void ColorPickedInEyeDropper(int r, int g, int b, int a);
+
+  // DevTools index event callbacks.
+  void OnDevToolsIndexingWorkCalculated(int request_id,
+                                        const std::string& file_system_path,
+                                        int total_work);
+  void OnDevToolsIndexingWorked(int request_id,
+                                const std::string& file_system_path,
+                                int worked);
+  void OnDevToolsIndexingDone(int request_id,
+                              const std::string& file_system_path);
+  void OnDevToolsSearchCompleted(int request_id,
+                                 const std::string& file_system_path,
+                                 const std::vector<std::string>& file_paths);
+
+  // Set fullscreen mode triggered by html api.
+  void SetHtmlApiFullscreen(bool enter_fullscreen);
+  // Update the html fullscreen flag in both browser and renderer.
+  void UpdateHtmlApiFullscreen(bool fullscreen);
+
   v8::Global<v8::Value> session_;
   v8::Global<v8::Value> devtools_web_contents_;
   v8::Global<v8::Value> debugger_;
 
-  std::unique_ptr<ElectronJavaScriptDialogManager> dialog_manager_;
   std::unique_ptr<WebViewGuestDelegate> guest_delegate_;
   std::unique_ptr<FrameSubscriber> frame_subscriber_;
 
@@ -670,18 +805,21 @@ class WebContents : public gin::Wrappable<WebContents>,
 #endif
 
   // The host webcontents that may contain this webcontents.
-  WebContents* embedder_ = nullptr;
+  RAW_PTR_EXCLUSION WebContents* embedder_ = nullptr;
 
-  // The zoom controller for this webContents.
-  WebContentsZoomController* zoom_controller_ = nullptr;
+  // Whether the guest view has been attached.
+  bool attached_ = false;
 
   // The type of current WebContents.
-  Type type_ = Type::BROWSER_WINDOW;
+  Type type_ = Type::kBrowserWindow;
+
+  // Weather the guest view should be transparent
+  bool guest_transparent_ = true;
 
   int32_t id_;
 
   // Request id used for findInPage request.
-  uint32_t request_id_ = 0;
+  uint32_t find_in_page_request_id_ = 0;
 
   // Whether background throttling is disabled.
   bool background_throttling_ = true;
@@ -692,25 +830,71 @@ class WebContents : public gin::Wrappable<WebContents>,
   // Observers of this WebContents.
   base::ObserverList<ExtendedWebContentsObserver> observers_;
 
-  bool initially_shown_ = true;
+  v8::Global<v8::Value> pending_child_web_preferences_;
 
-  // The ID of the process of the currently committed RenderViewHost.
-  // -1 means no speculative RVH has been committed yet.
-  int currently_committed_process_id_ = -1;
+  // The window that this WebContents belongs to.
+  base::WeakPtr<NativeWindow> owner_window_;
 
-  service_manager::BinderRegistryWithArgs<content::RenderFrameHost*> registry_;
-  mojo::ReceiverSet<mojom::ElectronBrowser, content::RenderFrameHost*>
-      receivers_;
-  std::map<content::RenderFrameHost*, std::vector<mojo::ReceiverId>>
-      frame_to_receivers_map_;
+  bool offscreen_ = false;
 
-  base::WeakPtrFactory<WebContents> weak_factory_;
+  // Whether offscreen rendering use gpu shared texture
+  bool offscreen_use_shared_texture_ = false;
 
-  DISALLOW_COPY_AND_ASSIGN(WebContents);
+  // Whether window is fullscreened by HTML5 api.
+  bool html_fullscreen_ = false;
+
+  // Whether window is fullscreened by window api.
+  bool native_fullscreen_ = false;
+
+  const scoped_refptr<DevToolsFileSystemIndexer> devtools_file_system_indexer_ =
+      base::MakeRefCounted<DevToolsFileSystemIndexer>();
+
+  ExclusiveAccessManager exclusive_access_manager_{this};
+
+  std::unique_ptr<DevToolsEyeDropper> eye_dropper_;
+
+  raw_ptr<ElectronBrowserContext> browser_context_;
+
+  // The stored InspectableWebContents object.
+  // Notice that inspectable_web_contents_ must be placed after
+  // dialog_manager_, so we can make sure inspectable_web_contents_ is
+  // destroyed before dialog_manager_, otherwise a crash would happen.
+  std::unique_ptr<InspectableWebContents> inspectable_web_contents_;
+
+  // The zoom controller for this webContents.
+  // Note: owned by inspectable_web_contents_, so declare this *after*
+  // that field to ensure the dtor destroys them in the right order.
+  raw_ptr<WebContentsZoomController> zoom_controller_ = nullptr;
+
+  // Maps url to file path, used by the file requests sent from devtools.
+  typedef std::map<std::string, base::FilePath> PathsMap;
+  PathsMap saved_files_;
+
+  // Map id to index job, used for file system indexing requests from devtools.
+  typedef std::
+      map<int, scoped_refptr<DevToolsFileSystemIndexer::FileSystemIndexingJob>>
+          DevToolsIndexingJobsMap;
+  DevToolsIndexingJobsMap devtools_indexing_jobs_;
+
+  const scoped_refptr<base::SequencedTaskRunner> file_task_runner_ =
+      base::ThreadPool::CreateSequencedTaskRunner({base::MayBlock()});
+
+#if BUILDFLAG(ENABLE_PRINTING)
+  const scoped_refptr<base::TaskRunner> print_task_runner_;
+#endif
+
+  // Stores the frame thats currently in fullscreen, nullptr if there is none.
+  raw_ptr<content::RenderFrameHost> fullscreen_frame_ = nullptr;
+
+  std::unique_ptr<SkRegion> draggable_region_;
+
+  bool force_non_draggable_ = false;
+
+  base::WeakPtrFactory<WebContents> weak_factory_{this};
 };
 
 }  // namespace api
 
 }  // namespace electron
 
-#endif  // SHELL_BROWSER_API_ELECTRON_API_WEB_CONTENTS_H_
+#endif  // ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_CONTENTS_H_

@@ -7,9 +7,7 @@
 #include <memory>
 #include <string>
 
-#include "base/lazy_instance.h"
-#include "base/logging.h"
-#include "base/macros.h"
+#include "base/no_destructor.h"
 #include "components/version_info/version_info.h"
 #include "content/public/common/user_agent.h"
 #include "extensions/common/core_extensions_api_provider.h"
@@ -30,8 +28,14 @@ namespace {
 class ElectronPermissionMessageProvider
     : public extensions::PermissionMessageProvider {
  public:
-  ElectronPermissionMessageProvider() {}
-  ~ElectronPermissionMessageProvider() override {}
+  ElectronPermissionMessageProvider() = default;
+  ~ElectronPermissionMessageProvider() override = default;
+
+  // disable copy
+  ElectronPermissionMessageProvider(const ElectronPermissionMessageProvider&) =
+      delete;
+  ElectronPermissionMessageProvider& operator=(
+      const ElectronPermissionMessageProvider&) = delete;
 
   // PermissionMessageProvider implementation.
   extensions::PermissionMessages GetPermissionMessages(
@@ -53,24 +57,19 @@ class ElectronPermissionMessageProvider
       extensions::Manifest::Type extension_type) const override {
     return extensions::PermissionIDSet();
   }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(ElectronPermissionMessageProvider);
 };
-
-base::LazyInstance<ElectronPermissionMessageProvider>::DestructorAtExit
-    g_permission_message_provider = LAZY_INSTANCE_INITIALIZER;
 
 }  // namespace
 
 ElectronExtensionsClient::ElectronExtensionsClient()
     : webstore_base_url_(extension_urls::kChromeWebstoreBaseURL),
+      new_webstore_base_url_(extension_urls::kNewChromeWebstoreBaseURL),
       webstore_update_url_(extension_urls::kChromeWebstoreUpdateURL) {
   AddAPIProvider(std::make_unique<extensions::CoreExtensionsAPIProvider>());
   AddAPIProvider(std::make_unique<ElectronExtensionsAPIProvider>());
 }
 
-ElectronExtensionsClient::~ElectronExtensionsClient() {}
+ElectronExtensionsClient::~ElectronExtensionsClient() = default;
 
 void ElectronExtensionsClient::Initialize() {
   // TODO(jamescook): Do we need to whitelist any extensions?
@@ -82,7 +81,9 @@ void ElectronExtensionsClient::InitializeWebStoreUrls(
 const extensions::PermissionMessageProvider&
 ElectronExtensionsClient::GetPermissionMessageProvider() const {
   NOTIMPLEMENTED();
-  return g_permission_message_provider.Get();
+
+  static base::NoDestructor<ElectronPermissionMessageProvider> instance;
+  return *instance;
 }
 
 const std::string ElectronExtensionsClient::GetProductName() {
@@ -125,14 +126,16 @@ const GURL& ElectronExtensionsClient::GetWebstoreBaseURL() const {
   return webstore_base_url_;
 }
 
+const GURL& ElectronExtensionsClient::GetNewWebstoreBaseURL() const {
+  return new_webstore_base_url_;
+}
+
 const GURL& ElectronExtensionsClient::GetWebstoreUpdateURL() const {
   return webstore_update_url_;
 }
 
-bool ElectronExtensionsClient::IsBlacklistUpdateURL(const GURL& url) const {
-  // TODO(rockot): Maybe we want to do something else here. For now we accept
-  // any URL as a blacklist URL because we don't really care.
-  return true;
+bool ElectronExtensionsClient::IsBlocklistUpdateURL(const GURL& url) const {
+  return false;
 }
 
 }  // namespace electron

@@ -4,20 +4,24 @@
 
 #include "shell/browser/api/electron_api_net_log.h"
 
+#include <string>
 #include <utility>
 
 #include "base/command_line.h"
+#include "base/files/file_path.h"
+#include "base/functional/bind.h"
 #include "base/task/thread_pool.h"
 #include "chrome/browser/browser_process.h"
 #include "components/net_log/chrome_net_log.h"
 #include "content/public/browser/storage_partition.h"
 #include "electron/electron_version.h"
+#include "gin/handle.h"
 #include "gin/object_template_builder.h"
+#include "net/log/net_log_capture_mode.h"
 #include "shell/browser/electron_browser_context.h"
 #include "shell/browser/net/system_network_context_manager.h"
 #include "shell/common/gin_converters/file_path_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
-#include "shell/common/node_includes.h"
 
 namespace gin {
 
@@ -79,7 +83,7 @@ namespace api {
 gin::WrapperInfo NetLog::kWrapperInfo = {gin::kEmbedderNativeGin};
 
 NetLog::NetLog(v8::Isolate* isolate, ElectronBrowserContext* browser_context)
-    : browser_context_(browser_context), weak_ptr_factory_(this) {
+    : browser_context_(browser_context) {
   file_task_runner_ = CreateFileTaskRunner();
 }
 
@@ -121,27 +125,25 @@ v8::Local<v8::Promise> NetLog::StartLogging(base::FilePath log_path,
   }
 
   pending_start_promise_ =
-      base::make_optional<gin_helper::Promise<void>>(args->isolate());
+      std::make_optional<gin_helper::Promise<void>>(args->isolate());
   v8::Local<v8::Promise> handle = pending_start_promise_->GetHandle();
 
   auto command_line_string =
       base::CommandLine::ForCurrentProcess()->GetCommandLineString();
   auto channel_string = std::string("Electron " ELECTRON_VERSION);
-  base::Value custom_constants =
-      base::Value::FromUniquePtrValue(net_log::GetPlatformConstantsForNetLog(
-          command_line_string, channel_string));
+  base::Value::Dict custom_constants = net_log::GetPlatformConstantsForNetLog(
+      command_line_string, channel_string);
 
   auto* network_context =
-      content::BrowserContext::GetDefaultStoragePartition(browser_context_)
-          ->GetNetworkContext();
+      browser_context_->GetDefaultStoragePartition()->GetNetworkContext();
 
-  network_context->CreateNetLogExporter(mojo::MakeRequest(&net_log_exporter_));
-  net_log_exporter_.set_connection_error_handler(
+  network_context->CreateNetLogExporter(
+      net_log_exporter_.BindNewPipeAndPassReceiver());
+  net_log_exporter_.set_disconnect_handler(
       base::BindOnce(&NetLog::OnConnectionError, base::Unretained(this)));
 
-  base::PostTaskAndReplyWithResult(
-      file_task_runner_.get(), FROM_HERE,
-      base::BindOnce(OpenFileForWriting, log_path),
+  file_task_runner_->PostTaskAndReplyWithResult(
+      FROM_HERE, base::BindOnce(OpenFileForWriting, log_path),
       base::BindOnce(&NetLog::StartNetLogAfterCreateFile,
                      weak_ptr_factory_.GetWeakPtr(), capture_mode,
                      max_file_size, std::move(custom_constants)));
@@ -151,7 +153,7 @@ v8::Local<v8::Promise> NetLog::StartLogging(base::FilePath log_path,
 
 void NetLog::StartNetLogAfterCreateFile(net::NetLogCaptureMode capture_mode,
                                         uint64_t max_file_size,
-                                        base::Value custom_constants,
+                                        base::Value::Dict custom_constants,
                                         base::File output_file) {
   if (!net_log_exporter_) {
     // Theoretically the mojo pipe could have been closed by the time we get
@@ -199,9 +201,9 @@ v8::Local<v8::Promise> NetLog::StopLogging(gin::Arguments* args) {
     // pointer lives long enough to resolve the promise. Moving it into the
     // callback will cause the instance variable to become empty.
     net_log_exporter_->Stop(
-        base::Value(base::Value::Type::DICTIONARY),
+        base::Value::Dict(),
         base::BindOnce(
-            [](network::mojom::NetLogExporterPtr,
+            [](mojo::Remote<network::mojom::NetLogExporter>,
                gin_helper::Promise<void> promise, int32_t error) {
               ResolvePromiseWithNetError(std::move(promise), error);
             },

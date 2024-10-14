@@ -4,36 +4,35 @@
 
 #include "shell/renderer/api/electron_api_spell_check_client.h"
 
-#include <map>
+#include <iterator>
 #include <memory>
-
 #include <set>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "base/containers/contains.h"
 #include "base/logging.h"
 #include "base/numerics/safe_conversions.h"
-#include "base/threading/thread_task_runner_handle.h"
+#include "base/strings/utf_string_conversion_utils.h"
+#include "base/task/single_thread_task_runner.h"
 #include "components/spellcheck/renderer/spellcheck_worditerator.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/function_template.h"
+#include "shell/common/gin_helper/microtasks_scope.h"
 #include "third_party/blink/public/web/web_text_checking_completion.h"
 #include "third_party/blink/public/web/web_text_checking_result.h"
 #include "third_party/icu/source/common/unicode/uscript.h"
+#include "v8/include/v8-function.h"
 
-namespace electron {
-
-namespace api {
+namespace electron::api {
 
 namespace {
 
-bool HasWordCharacters(const base::string16& text, int index) {
-  const base::char16* data = text.data();
-  int length = text.length();
-  while (index < length) {
-    uint32_t code = 0;
-    U16_NEXT(data, index, length, code);
+bool HasWordCharacters(const std::u16string& text, size_t index) {
+  base_icu::UChar32 code;
+  while (base::ReadUnicodeCharacter(text.c_str(), text.size(), &index, &code)) {
     UErrorCode error = U_ZERO_ERROR;
     if (uscript_getScript(code, &error) != USCRIPT_COMMON)
       return true;
@@ -43,8 +42,8 @@ bool HasWordCharacters(const base::string16& text, int index) {
 
 struct Word {
   blink::WebTextCheckingResult result;
-  base::string16 text;
-  std::vector<base::string16> contraction_words;
+  std::u16string text;
+  std::vector<std::u16string> contraction_words;
 };
 
 }  // namespace
@@ -52,29 +51,28 @@ struct Word {
 class SpellCheckClient::SpellcheckRequest {
  public:
   SpellcheckRequest(
-      const base::string16& text,
+      const std::u16string& text,
       std::unique_ptr<blink::WebTextCheckingCompletion> completion)
       : text_(text), completion_(std::move(completion)) {}
   SpellcheckRequest(const SpellcheckRequest&) = delete;
   SpellcheckRequest& operator=(const SpellcheckRequest&) = delete;
   ~SpellcheckRequest() = default;
 
-  const base::string16& text() const { return text_; }
+  const std::u16string& text() const { return text_; }
   blink::WebTextCheckingCompletion* completion() { return completion_.get(); }
   std::vector<Word>& wordlist() { return word_list_; }
 
  private:
-  base::string16 text_;          // Text to be checked in this task.
+  std::u16string text_;          // Text to be checked in this task.
   std::vector<Word> word_list_;  // List of Words found in text
-  // The interface to send the misspelled ranges to WebKit.
+  // The interface to send the misspelled ranges to Blink.
   std::unique_ptr<blink::WebTextCheckingCompletion> completion_;
 };
 
 SpellCheckClient::SpellCheckClient(const std::string& language,
                                    v8::Isolate* isolate,
                                    v8::Local<v8::Object> provider)
-    : pending_request_param_(nullptr),
-      isolate_(isolate),
+    : isolate_(isolate),
       context_(isolate, isolate->GetCurrentContext()),
       provider_(isolate, provider) {
   DCHECK(!context_.IsEmpty());
@@ -94,7 +92,7 @@ SpellCheckClient::~SpellCheckClient() {
 void SpellCheckClient::RequestCheckingOfText(
     const blink::WebString& textToCheck,
     std::unique_ptr<blink::WebTextCheckingCompletion> completionCallback) {
-  base::string16 text(textToCheck.Utf16());
+  std::u16string text(textToCheck.Utf16());
   // Ignore invalid requests.
   if (text.empty() || !HasWordCharacters(text, 0)) {
     completionCallback->DidCancelCheckingText();
@@ -109,23 +107,18 @@ void SpellCheckClient::RequestCheckingOfText(
   pending_request_param_ =
       std::make_unique<SpellcheckRequest>(text, std::move(completionCallback));
 
-  base::ThreadTaskRunnerHandle::Get()->PostTask(
-      FROM_HERE,
-      base::BindOnce(&SpellCheckClient::SpellCheckText, AsWeakPtr()));
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(&SpellCheckClient::SpellCheckText,
+                                weak_factory_.GetWeakPtr()));
 }
 
 bool SpellCheckClient::IsSpellCheckingEnabled() const {
   return true;
 }
 
-void SpellCheckClient::ShowSpellingUI(bool show) {}
-
 bool SpellCheckClient::IsShowingSpellingUI() {
   return false;
 }
-
-void SpellCheckClient::UpdateSpellingUIWithMisspelledWord(
-    const blink::WebString& word) {}
 
 void SpellCheckClient::SpellCheckText() {
   const auto& text = pending_request_param_->text();
@@ -149,13 +142,13 @@ void SpellCheckClient::SpellCheckText() {
     return;
   }
 
-  text_iterator_.SetText(text.c_str(), text.size());
+  text_iterator_.SetText(text);
 
   SpellCheckScope scope(*this);
-  base::string16 word;
+  std::u16string word;
   size_t word_start;
   size_t word_length;
-  std::set<base::string16> words;
+  std::set<std::u16string> words;
   auto& word_list = pending_request_param_->wordlist();
   Word word_entry;
   for (;;) {  // Run until end of text
@@ -187,21 +180,21 @@ void SpellCheckClient::SpellCheckText() {
 }
 
 void SpellCheckClient::OnSpellCheckDone(
-    const std::vector<base::string16>& misspelled_words) {
+    const std::vector<std::u16string>& misspelled_words) {
   std::vector<blink::WebTextCheckingResult> results;
-  std::unordered_set<base::string16> misspelled(misspelled_words.begin(),
+  std::unordered_set<std::u16string> misspelled(misspelled_words.begin(),
                                                 misspelled_words.end());
 
   auto& word_list = pending_request_param_->wordlist();
 
   for (const auto& word : word_list) {
-    if (misspelled.find(word.text) != misspelled.end()) {
+    if (base::Contains(misspelled, word.text)) {
       // If this is a contraction, iterate through parts and accept the word
       // if none of them are misspelled
       if (!word.contraction_words.empty()) {
         auto all_correct = true;
         for (const auto& contraction_word : word.contraction_words) {
-          if (misspelled.find(contraction_word) != misspelled.end()) {
+          if (base::Contains(misspelled, contraction_word)) {
             all_correct = false;
             break;
           }
@@ -217,18 +210,22 @@ void SpellCheckClient::OnSpellCheckDone(
 }
 
 void SpellCheckClient::SpellCheckWords(const SpellCheckScope& scope,
-                                       const std::set<base::string16>& words) {
+                                       const std::set<std::u16string>& words) {
   DCHECK(!scope.spell_check_.IsEmpty());
 
-  v8::Local<v8::FunctionTemplate> templ = gin_helper::CreateFunctionTemplate(
-      isolate_,
-      base::BindRepeating(&SpellCheckClient::OnSpellCheckDone, AsWeakPtr()));
-
   auto context = isolate_->GetCurrentContext();
+  gin_helper::MicrotasksScope microtasks_scope{
+      isolate_, context->GetMicrotaskQueue(), false,
+      v8::MicrotasksScope::kDoNotRunMicrotasks};
+
+  v8::Local<v8::FunctionTemplate> templ = gin_helper::CreateFunctionTemplate(
+      isolate_, base::BindRepeating(&SpellCheckClient::OnSpellCheckDone,
+                                    weak_factory_.GetWeakPtr()));
   v8::Local<v8::Value> args[] = {gin::ConvertToV8(isolate_, words),
                                  templ->GetFunction(context).ToLocalChecked()};
   // Call javascript with the words and the callback function
-  scope.spell_check_->Call(context, scope.provider_, 2, args).IsEmpty();
+  scope.spell_check_->Call(context, scope.provider_, std::size(args), args)
+      .IsEmpty();
 }
 
 // Returns whether or not the given string is a contraction.
@@ -239,13 +236,13 @@ void SpellCheckClient::SpellCheckWords(const SpellCheckScope& scope,
 // words in the contraction.
 bool SpellCheckClient::IsContraction(
     const SpellCheckScope& scope,
-    const base::string16& contraction,
-    std::vector<base::string16>* contraction_words) {
+    const std::u16string& contraction,
+    std::vector<std::u16string>* contraction_words) {
   DCHECK(contraction_iterator_.IsInitialized());
 
-  contraction_iterator_.SetText(contraction.c_str(), contraction.length());
+  contraction_iterator_.SetText(contraction);
 
-  base::string16 word;
+  std::u16string word;
   size_t word_start;
   size_t word_length;
   for (auto status =
@@ -272,6 +269,4 @@ SpellCheckClient::SpellCheckScope::SpellCheckScope(
 
 SpellCheckClient::SpellCheckScope::~SpellCheckScope() = default;
 
-}  // namespace api
-
-}  // namespace electron
+}  // namespace electron::api

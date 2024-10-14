@@ -2,8 +2,8 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef SHELL_RENDERER_ELECTRON_AUTOFILL_AGENT_H_
-#define SHELL_RENDERER_ELECTRON_AUTOFILL_AGENT_H_
+#ifndef ELECTRON_SHELL_RENDERER_ELECTRON_AUTOFILL_AGENT_H_
+#define ELECTRON_SHELL_RENDERER_ELECTRON_AUTOFILL_AGENT_H_
 
 #include <vector>
 
@@ -21,16 +21,21 @@
 
 namespace electron {
 
-class AutofillAgent : public content::RenderFrameObserver,
-                      public blink::WebAutofillClient,
-                      public mojom::ElectronAutofillAgent {
+class AutofillAgent : private content::RenderFrameObserver,
+                      private blink::WebAutofillClient,
+                      private mojom::ElectronAutofillAgent {
  public:
   explicit AutofillAgent(content::RenderFrame* frame,
                          blink::AssociatedInterfaceRegistry* registry);
   ~AutofillAgent() override;
 
-  void BindReceiver(
-      mojo::PendingAssociatedReceiver<mojom::ElectronAutofillAgent> receiver);
+  // disable copy
+  AutofillAgent(const AutofillAgent&) = delete;
+  AutofillAgent& operator=(const AutofillAgent&) = delete;
+
+  void BindPendingReceiver(
+      mojo::PendingAssociatedReceiver<mojom::ElectronAutofillAgent>
+          pending_receiver);
 
   // content::RenderFrameObserver:
   void OnDestruct() override;
@@ -43,10 +48,17 @@ class AutofillAgent : public content::RenderFrameObserver,
 
  private:
   struct ShowSuggestionsOptions {
-    ShowSuggestionsOptions();
-    bool autofill_on_empty_values;
-    bool requires_caret_at_end;
+    // Specifies that suggestions should be shown when |element| contains no
+    // text.
+    bool autofill_on_empty_values{false};
+    // Specifies that suggestions should be shown when the caret is not
+    // after the last character in the element.
+    bool requires_caret_at_end{false};
   };
+
+  // Shuts the AutofillAgent down on RenderFrame deletion. Safe to call multiple
+  // times.
+  void Shutdown();
 
   // blink::WebAutofillClient:
   void TextFieldDidEndEditing(const blink::WebInputElement&) override;
@@ -58,17 +70,17 @@ class AutofillAgent : public content::RenderFrameObserver,
   void DataListOptionsChanged(const blink::WebInputElement&) override;
 
   // mojom::ElectronAutofillAgent
-  void AcceptDataListSuggestion(const base::string16& suggestion) override;
+  void AcceptDataListSuggestion(const std::u16string& suggestion) override;
 
   bool IsUserGesture() const;
   void HidePopup();
   void ShowPopup(const blink::WebFormControlElement&,
-                 const std::vector<base::string16>&,
-                 const std::vector<base::string16>&);
+                 const std::vector<std::u16string>&,
+                 const std::vector<std::u16string>&);
   void ShowSuggestions(const blink::WebFormControlElement& element,
                        const ShowSuggestionsOptions& options);
 
-  void DoFocusChangeComplete();
+  void HandleFocusChangeComplete();
 
   const mojo::AssociatedRemote<mojom::ElectronAutofillDriver>&
   GetAutofillDriver();
@@ -84,11 +96,9 @@ class AutofillAgent : public content::RenderFrameObserver,
 
   mojo::AssociatedReceiver<mojom::ElectronAutofillAgent> receiver_{this};
 
-  base::WeakPtrFactory<AutofillAgent> weak_ptr_factory_;
-
-  DISALLOW_COPY_AND_ASSIGN(AutofillAgent);
+  base::WeakPtrFactory<AutofillAgent> weak_ptr_factory_{this};
 };
 
 }  // namespace electron
 
-#endif  // SHELL_RENDERER_ELECTRON_AUTOFILL_AGENT_H_
+#endif  // ELECTRON_SHELL_RENDERER_ELECTRON_AUTOFILL_AGENT_H_
