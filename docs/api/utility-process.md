@@ -86,8 +86,24 @@ true if the kill is successful, and false otherwise.
 #### `child.pid`
 
 A `Integer | undefined` representing the process identifier (PID) of the child process.
-If the child process fails to spawn due to errors, then the value is `undefined`. When
+Until the child process has spawned successfully, the value is `undefined`. When
 the child process exits, then the value is `undefined` after the `exit` event is emitted.
+
+```js
+const child = utilityProcess.fork(path.join(__dirname, 'test.js'))
+
+console.log(child.pid) // undefined
+
+child.on('spawn', () => {
+  console.log(child.pid) // Integer
+})
+
+child.on('exit', () => {
+  console.log(child.pid) // undefined
+})
+```
+
+**Note:** You can use the `pid` to determine if the process is currently running.
 
 #### `child.stdout`
 
@@ -135,7 +151,7 @@ child process terminates.
 Returns:
 
 * `code` number - Contains the exit code for
-the process obtained from waitpid on posix, or GetExitCodeProcess on windows.
+the process obtained from waitpid on POSIX, or GetExitCodeProcess on Windows.
 
 Emitted after the child process ends.
 

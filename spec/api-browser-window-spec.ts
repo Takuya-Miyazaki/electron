@@ -17,7 +17,7 @@ import * as nodeUrl from 'node:url';
 
 import { emittedUntil, emittedNTimes } from './lib/events-helpers';
 import { HexColors, hasCapturableScreen, ScreenCapture } from './lib/screen-helpers';
-import { ifit, ifdescribe, defer, listen } from './lib/spec-helpers';
+import { ifit, ifdescribe, defer, listen, waitUntil } from './lib/spec-helpers';
 import { closeWindow, closeAllWindows } from './lib/window-helpers';
 
 const fixtures = path.resolve(__dirname, 'fixtures');
@@ -942,12 +942,11 @@ describe('BrowserWindow module', () => {
             'did-frame-navigate',
             'did-navigate'
           ];
-          const allEvents = Promise.all(navigationEvents.map(event =>
+          const allEvents = Promise.all(expectedEventOrder.map(event =>
             once(w.webContents, event).then(() => firedEvents.push(event))
           ));
-          const timeout = setTimeout(1000);
           w.loadURL(url);
-          await Promise.race([allEvents, timeout]);
+          await allEvents;
           expect(firedEvents).to.deep.equal(expectedEventOrder);
         });
 
@@ -1545,11 +1544,32 @@ describe('BrowserWindow module', () => {
           await expect(once(w, 'resized')).to.eventually.be.fulfilled();
         });
       });
+
+      it('does not emits the resize event for move-only changes', async () => {
+        const [x, y] = w.getPosition();
+
+        w.once('resize', () => {
+          expect.fail('resize event should not be emitted');
+        });
+
+        w.setBounds({ x: x + 10, y: y + 10 });
+      });
     });
 
     describe('BrowserWindow.setSize(width, height)', () => {
       it('sets the window size', async () => {
         const size = [300, 400];
+
+        const resized = once(w, 'resize');
+        w.setSize(size[0], size[1]);
+        await resized;
+
+        expectBoundsEqual(w.getSize(), size);
+      });
+
+      it('emits the resize event for single-pixel size changes', async () => {
+        const [width, height] = w.getSize();
+        const size = [width + 1, height - 1];
 
         const resized = once(w, 'resize');
         w.setSize(size[0], size[1]);
@@ -2513,6 +2533,22 @@ describe('BrowserWindow module', () => {
       expect(w.isAlwaysOnTop()).to.be.false();
       expect(c.isAlwaysOnTop()).to.be.true('child is not always on top');
       expect(c._getAlwaysOnTopLevel()).to.equal('screen-saver');
+    });
+
+    it('works when called prior to show', async () => {
+      w = new BrowserWindow({ show: false });
+      w.setAlwaysOnTop(true, 'screen-saver');
+      w.show();
+      await setTimeout(1000);
+      expect(w.isAlwaysOnTop()).to.be.true('is not alwaysOnTop');
+    });
+
+    it('works when called prior to showInactive', async () => {
+      w = new BrowserWindow({ show: false });
+      w.setAlwaysOnTop(true, 'screen-saver');
+      w.showInactive();
+      await setTimeout(1000);
+      expect(w.isAlwaysOnTop()).to.be.true('is not alwaysOnTop');
     });
   });
 
@@ -5999,8 +6035,10 @@ describe('BrowserWindow module', () => {
           w.webContents.on('enter-html-full-screen', async () => {
             enterCount++;
             if (w.isFullScreen()) reject(new Error('w.isFullScreen should be false'));
-            const isFS = await w.webContents.executeJavaScript('!!document.fullscreenElement');
-            if (!isFS) reject(new Error('Document should have fullscreen element'));
+            await waitUntil(async () => {
+              const isFS = await w.webContents.executeJavaScript('!!document.fullscreenElement');
+              return isFS === true;
+            });
             checkDone();
           });
 

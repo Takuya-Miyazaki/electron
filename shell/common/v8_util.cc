@@ -4,6 +4,7 @@
 
 #include "shell/common/v8_util.h"
 
+#include <cstdint>
 #include <utility>
 #include <vector>
 
@@ -20,11 +21,11 @@
 namespace electron {
 
 namespace {
-enum SerializationTag {
-  kNativeImageTag = 'i',
-  kTrailerOffsetTag = 0xFE,
-  kVersionTag = 0xFF
-};
+
+constexpr uint8_t kNativeImageTag = 'i';
+constexpr uint8_t kTrailerOffsetTag = 0xFE;
+constexpr uint8_t kVersionTag = 0xFF;
+
 }  // namespace
 
 class V8Serializer : public v8::ValueSerializer::Delegate {
@@ -104,7 +105,7 @@ class V8Serializer : public v8::ValueSerializer::Delegate {
   }
 
  private:
-  void WriteTag(SerializationTag tag) { serializer_.WriteRawBytes(&tag, 1); }
+  void WriteTag(const uint8_t tag) { serializer_.WriteRawBytes(&tag, 1U); }
 
   void WriteBlinkEnvelope(uint32_t blink_version) {
     // Write a dummy blink version envelope for compatibility with
@@ -252,8 +253,8 @@ namespace util {
  * |v8::ArrayBufferView::ByteLength()|.
  */
 base::span<uint8_t> as_byte_span(v8::Local<v8::ArrayBufferView> val) {
-  uint8_t* data =
-      static_cast<uint8_t*>(val->Buffer()->Data()) + val->ByteOffset();
+  uint8_t* data = UNSAFE_BUFFERS(static_cast<uint8_t*>(val->Buffer()->Data()) +
+                                 val->ByteOffset());
   const size_t size = val->ByteLength();
   return UNSAFE_BUFFERS(base::span{data, size});
 }
