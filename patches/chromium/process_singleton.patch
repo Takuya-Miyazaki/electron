@@ -18,10 +18,10 @@ This patch adds a few changes to the Chromium code:
    admin permissions.
 
 diff --git a/chrome/browser/process_singleton.h b/chrome/browser/process_singleton.h
-index 23a8257aa2a0a671cf7af35aff9906891091606d..31f5b160e4cd755cfb56a62b04261ee1bee80277 100644
+index 6f081c26ca4cffe76104eae5a4130a81a93a539d..7da4c199de1d2721a2e6ba9cb10ba0bc146917b7 100644
 --- a/chrome/browser/process_singleton.h
 +++ b/chrome/browser/process_singleton.h
-@@ -102,12 +102,19 @@ class ProcessSingleton {
+@@ -104,12 +104,19 @@ class ProcessSingleton {
        base::RepeatingCallback<bool(base::CommandLine command_line,
                                     const base::FilePath& current_directory)>;
  
@@ -41,20 +41,20 @@ index 23a8257aa2a0a671cf7af35aff9906891091606d..31f5b160e4cd755cfb56a62b04261ee1
    ~ProcessSingleton();
  
    // Notify another process, if available. Otherwise sets ourselves as the
-@@ -176,6 +183,8 @@ class ProcessSingleton {
+@@ -189,6 +196,8 @@ class ProcessSingleton {
  #if BUILDFLAG(IS_WIN)
    bool EscapeVirtualization(const base::FilePath& user_data_dir);
  
 +  std::string program_name_; // Used for mutexName.
 +  bool is_app_sandboxed_; // Whether the Electron app is sandboxed.
    HWND remote_window_;  // The HWND_MESSAGE of another browser.
-   base::win::MessageWindow window_;  // The message-only window.
    bool is_virtualized_;  // Stuck inside Microsoft Softricity VM environment.
+ 
 diff --git a/chrome/browser/process_singleton_posix.cc b/chrome/browser/process_singleton_posix.cc
-index b7c45982e2c05874d60b21da96da6551f51155b1..0e036b178d8ea9bbe5564e8bbdb394b8a0d4cb3d 100644
+index 2448abf73b097f04583aefda1fb1a67b3de67e5b..55f935f38bf05586650e7a83a689347bb41a45a4 100644
 --- a/chrome/browser/process_singleton_posix.cc
 +++ b/chrome/browser/process_singleton_posix.cc
-@@ -59,6 +59,7 @@
+@@ -55,6 +55,7 @@
  #include <memory>
  #include <set>
  #include <string>
@@ -79,7 +79,7 @@ index b7c45982e2c05874d60b21da96da6551f51155b1..0e036b178d8ea9bbe5564e8bbdb394b8
  #include "chrome/browser/ui/process_singleton_dialog_linux.h"
  #endif
  
-@@ -348,6 +350,8 @@ bool SymlinkPath(const base::FilePath& target, const base::FilePath& path) {
+@@ -355,6 +357,8 @@ bool SymlinkPath(const base::FilePath& target, const base::FilePath& path) {
  bool DisplayProfileInUseError(const base::FilePath& lock_path,
                                const std::string& hostname,
                                int pid) {
@@ -88,16 +88,15 @@ index b7c45982e2c05874d60b21da96da6551f51155b1..0e036b178d8ea9bbe5564e8bbdb394b8
    // Ensure there is an instance of ResourceBundle that is initialized for
    // localized string resource accesses.
    ui::ScopedStartupResourceBundle ensure_startup_resource_bundle;
-@@ -370,6 +374,8 @@ bool DisplayProfileInUseError(const base::FilePath& lock_path,
- #endif
- 
+@@ -377,6 +381,7 @@ bool DisplayProfileInUseError(const base::FilePath& lock_path,
+ #else
    NOTREACHED();
-+  return false;
+ #endif
 +#endif
  }
  
  bool IsChromeProcess(pid_t pid) {
-@@ -382,6 +388,21 @@ bool IsChromeProcess(pid_t pid) {
+@@ -389,6 +394,21 @@ bool IsChromeProcess(pid_t pid) {
                base::FilePath(chrome::kBrowserProcessExecutableName));
  }
  
@@ -119,7 +118,7 @@ index b7c45982e2c05874d60b21da96da6551f51155b1..0e036b178d8ea9bbe5564e8bbdb394b8
  // A helper class to hold onto a socket.
  class ScopedSocket {
   public:
-@@ -785,6 +806,10 @@ ProcessSingleton::~ProcessSingleton() {
+@@ -775,6 +795,10 @@ ProcessSingleton::~ProcessSingleton() {
    if (watcher_) {
      watcher_->OnEminentProcessSingletonDestruction();
    }
@@ -130,11 +129,11 @@ index b7c45982e2c05874d60b21da96da6551f51155b1..0e036b178d8ea9bbe5564e8bbdb394b8
  }
  
  ProcessSingleton::NotifyResult ProcessSingleton::NotifyOtherProcess() {
-@@ -1055,11 +1080,32 @@ bool ProcessSingleton::Create() {
+@@ -1039,11 +1063,32 @@ bool ProcessSingleton::Create() {
    // Create the socket file somewhere in /tmp which is usually mounted as a
    // normal filesystem. Some network filesystems (notably AFS) are screwy and
    // do not support Unix domain sockets.
--  if (!socket_dir_.CreateUniqueTempDir()) {
+-  if (!socket_dir_.CreateUniqueTempDir(/*prefix=*/FILE_PATH_LITERAL(""))) {
 -    LOG(ERROR) << "Failed to create socket directory.";
 +  base::FilePath tmp_dir;
 +  if (!base::GetTempDir(&tmp_dir)) {
@@ -166,10 +165,10 @@ index b7c45982e2c05874d60b21da96da6551f51155b1..0e036b178d8ea9bbe5564e8bbdb394b8
    int dir_mode = 0;
    CHECK(base::GetPosixFilePermissions(socket_dir_.GetPath(), &dir_mode) &&
 diff --git a/chrome/browser/process_singleton_win.cc b/chrome/browser/process_singleton_win.cc
-index 68ca956bdd251f1fadccbd2f4e336918141cadf1..d91f58ebe3a024bc41ed72121c49172f68e0d862 100644
+index eddaeacf428650bc4c55498e7560e253a4cdf2f0..b60a546b39b0fe2747e5bbe5716b693b7ffe09bd 100644
 --- a/chrome/browser/process_singleton_win.cc
 +++ b/chrome/browser/process_singleton_win.cc
-@@ -29,7 +29,9 @@
+@@ -30,7 +30,9 @@
  #include "base/win/wmi.h"
  #include "chrome/browser/process_singleton_internal.h"
  #include "chrome/browser/shell_integration.h"
@@ -179,7 +178,7 @@ index 68ca956bdd251f1fadccbd2f4e336918141cadf1..d91f58ebe3a024bc41ed72121c49172f
  #include "chrome/browser/win/chrome_process_finder.h"
  #include "chrome/common/chrome_constants.h"
  #include "chrome/common/chrome_paths.h"
-@@ -164,6 +166,7 @@ bool ProcessLaunchNotification(
+@@ -166,6 +168,7 @@ bool ProcessLaunchNotification(
  }
  
  bool DisplayShouldKillMessageBox() {
@@ -187,7 +186,7 @@ index 68ca956bdd251f1fadccbd2f4e336918141cadf1..d91f58ebe3a024bc41ed72121c49172f
    TRACE_EVENT0("startup", "ProcessSingleton:DisplayShouldKillMessageBox");
  
    // Ensure there is an instance of ResourceBundle that is initialized for
-@@ -174,6 +177,10 @@ bool DisplayShouldKillMessageBox() {
+@@ -176,6 +179,10 @@ bool DisplayShouldKillMessageBox() {
               NULL, l10n_util::GetStringUTF16(IDS_PRODUCT_NAME),
               l10n_util::GetStringUTF16(IDS_BROWSER_HUNGBROWSER_MESSAGE)) !=
           chrome::MESSAGE_BOX_RESULT_NO;
@@ -198,7 +197,21 @@ index 68ca956bdd251f1fadccbd2f4e336918141cadf1..d91f58ebe3a024bc41ed72121c49172f
  }
  
  // Function was copied from Process::Terminate.
-@@ -256,9 +263,13 @@ bool ProcessSingleton::EscapeVirtualization(
+@@ -245,8 +252,12 @@ base::File CreateLockFileWithTimeout(const base::FilePath& lock_file_path,
+           lock_file_path.value().c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+           nullptr, CREATE_ALWAYS,
+           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
++      // Capture the error before leaving the scope: the TRACE_EVENT0
++      // destructor that runs at the end of this block can reset the thread's
++      // last-error code to ERROR_SUCCESS. Reading it afterwards and passing 0
++      // to base::File::OSErrorToFileError() trips a DCHECK.
++      error = ::GetLastError();
+     }
+-    error = ::GetLastError();
+ 
+     if (lock_file_handle != INVALID_HANDLE_VALUE) {
+       LOG_IF(WARNING, error == ERROR_ALREADY_EXISTS)
+@@ -327,11 +338,14 @@ bool ProcessSingleton::EscapeVirtualization(
  }
  
  ProcessSingleton::ProcessSingleton(
@@ -210,9 +223,11 @@ index 68ca956bdd251f1fadccbd2f4e336918141cadf1..d91f58ebe3a024bc41ed72121c49172f
 +      program_name_(program_name),
 +      is_app_sandboxed_(is_app_sandboxed),
        is_virtualized_(false),
-       lock_file_(INVALID_HANDLE_VALUE),
+-      lock_file_(INVALID_HANDLE_VALUE),
        user_data_dir_(user_data_dir),
-@@ -381,7 +392,7 @@ ProcessSingleton::NotifyOtherProcessOrCreate() {
+       should_kill_remote_process_callback_(
+           base::BindRepeating(&DisplayShouldKillMessageBox)) {}
+@@ -444,7 +458,7 @@ ProcessSingleton::NotifyOtherProcessOrCreate() {
  bool ProcessSingleton::Create() {
    TRACE_EVENT0("startup", "ProcessSingleton::Create");
  
@@ -221,16 +236,16 @@ index 68ca956bdd251f1fadccbd2f4e336918141cadf1..d91f58ebe3a024bc41ed72121c49172f
  
    remote_window_ = FindRunningChromeWindow(user_data_dir_);
    if (!remote_window_ && !EscapeVirtualization(user_data_dir_)) {
-@@ -390,7 +401,7 @@ bool ProcessSingleton::Create() {
+@@ -453,7 +467,7 @@ bool ProcessSingleton::Create() {
      // access. As documented, it's clearer to NOT request ownership on creation
      // since it isn't guaranteed we will get it. It is better to create it
      // without ownership and explicitly get the ownership afterward.
 -    base::win::ScopedHandle only_me(::CreateMutex(NULL, FALSE, kMutexName));
 +    base::win::ScopedHandle only_me(::CreateMutex(NULL, FALSE, mutexName.c_str()));
-     if (!only_me.IsValid()) {
+     if (!only_me.is_valid()) {
        DPLOG(FATAL) << "CreateMutex failed";
        return false;
-@@ -429,6 +440,17 @@ bool ProcessSingleton::Create() {
+@@ -484,6 +498,17 @@ bool ProcessSingleton::Create() {
              window_.CreateNamed(base::BindRepeating(&ProcessLaunchNotification,
                                                      notification_callback_),
                                  user_data_dir_.value());

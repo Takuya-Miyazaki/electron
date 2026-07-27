@@ -15,6 +15,7 @@
 #include "shell/browser/extensions/api/management/electron_management_api_delegate.h"
 #include "shell/browser/extensions/electron_extension_web_contents_observer.h"
 #include "shell/browser/extensions/electron_messaging_delegate.h"
+#include "shell/common/gin_helper/handle.h"
 #include "v8/include/v8.h"
 
 #if BUILDFLAG(ENABLE_PRINTING)
@@ -27,7 +28,7 @@ namespace extensions {
 class ElectronGuestViewManagerDelegate
     : public ExtensionsGuestViewManagerDelegate {
  public:
-  ElectronGuestViewManagerDelegate() : ExtensionsGuestViewManagerDelegate() {}
+  ElectronGuestViewManagerDelegate() = default;
   ~ElectronGuestViewManagerDelegate() override = default;
 
   // disable copy
@@ -90,6 +91,7 @@ void ElectronExtensionsAPIClient::AttachWebContentsHelpers(
     content::WebContents* web_contents) const {
 #if BUILDFLAG(ENABLE_PRINTING)
   electron::PrintViewManagerElectron::CreateForWebContents(web_contents);
+  printing::CreateCompositeClientIfNeeded(web_contents, std::string());
 #endif
 
   extensions::ElectronExtensionWebContentsObserver::CreateForWebContents(

@@ -8,15 +8,10 @@
 #include "content/public/browser/render_process_host.h"
 #include "shell/browser/api/electron_api_web_frame_main.h"
 #include "shell/common/gin_helper/accessor.h"
+#include "shell/common/gin_helper/handle.h"
 #include "shell/common/node_util.h"
 
 namespace gin {
-
-namespace {
-
-v8::Persistent<v8::ObjectTemplate> rfh_templ;
-
-}  // namespace
 
 // static
 v8::Local<v8::Value> Converter<content::FrameTreeNodeId>::ToV8(
@@ -59,17 +54,11 @@ Converter<gin_helper::AccessorValue<content::RenderFrameHost*>>::ToV8(
   const int32_t process_id = rfh->GetProcess()->GetID().GetUnsafeValue();
   const int routing_id = rfh->GetRoutingID();
 
-  if (rfh_templ.IsEmpty()) {
-    v8::EscapableHandleScope inner(isolate);
-    v8::Local<v8::ObjectTemplate> local = v8::ObjectTemplate::New(isolate);
-    local->SetInternalFieldCount(2);
-    rfh_templ.Reset(isolate, inner.Escape(local));
-  }
+  v8::Local<v8::ObjectTemplate> templ = v8::ObjectTemplate::New(isolate);
+  templ->SetInternalFieldCount(2);
 
   v8::Local<v8::Object> rfh_obj =
-      v8::Local<v8::ObjectTemplate>::New(isolate, rfh_templ)
-          ->NewInstance(isolate->GetCurrentContext())
-          .ToLocalChecked();
+      templ->NewInstance(isolate->GetCurrentContext()).ToLocalChecked();
 
   rfh_obj->SetInternalField(0, v8::Number::New(isolate, process_id));
   rfh_obj->SetInternalField(1, v8::Number::New(isolate, routing_id));
@@ -104,7 +93,7 @@ bool Converter<gin_helper::AccessorValue<content::RenderFrameHost*>>::FromV8(
   auto* rfh = content::RenderFrameHost::FromID(process_id, routing_id);
 
   if (!rfh) {
-    // Lazily evaluted property accessed after RFH has been destroyed.
+    // Lazily evaluated property accessed after RFH has been destroyed.
     // Continue to return nullptr, but emit warning to inform developers
     // what occurred.
     electron::util::EmitWarning(

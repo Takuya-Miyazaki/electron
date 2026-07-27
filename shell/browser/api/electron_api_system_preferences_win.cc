@@ -5,20 +5,21 @@
 #include <iomanip>
 #include <string_view>
 
-#include <dwmapi.h>
 #include <windows.devices.enumeration.h>
 #include <wrl/client.h>
 
 #include "shell/browser/api/electron_api_system_preferences.h"
 
 #include "base/containers/fixed_flat_map.h"
+#include "base/logging.h"
 #include "base/win/core_winrt_util.h"
 #include "base/win/windows_types.h"
 #include "base/win/wrapped_window_proc.h"
 #include "shell/common/color_util.h"
 #include "shell/common/process_util.h"
-#include "ui/gfx/color_utils.h"
+#include "skia/ext/skia_utils_win.h"
 #include "ui/gfx/win/hwnd_util.h"
+#include "ui/gfx/win/singleton_hwnd.h"
 
 namespace electron {
 
@@ -76,10 +77,6 @@ std::string ConvertDeviceAccessStatus(DeviceAccessStatus value) {
 
 namespace api {
 
-bool SystemPreferences::IsAeroGlassEnabled() {
-  return true;
-}
-
 std::string hexColorDWORDToRGBA(DWORD color) {
   DWORD rgba = color << 8 | color >> 24;
   std::ostringstream stream;
@@ -88,14 +85,12 @@ std::string hexColorDWORDToRGBA(DWORD color) {
 }
 
 std::string SystemPreferences::GetAccentColor() {
-  DWORD color = 0;
-  BOOL opaque = FALSE;
+  std::optional<DWORD> color = GetSystemAccentColor();
 
-  if (FAILED(DwmGetColorizationColor(&color, &opaque))) {
+  if (!color.has_value())
     return "";
-  }
 
-  return hexColorDWORDToRGBA(color);
+  return ToRGBAHex(skia::COLORREFToSkColor(color.value()), false);
 }
 
 std::string SystemPreferences::GetColor(gin_helper::ErrorThrower thrower,
@@ -133,8 +128,8 @@ std::string SystemPreferences::GetColor(gin_helper::ErrorThrower thrower,
       {"window-text", COLOR_WINDOWTEXT},
   });
 
-  if (const auto* iter = Lookup.find(color); iter != Lookup.end())
-    return ToRGBAHex(color_utils::GetSysSkColor(iter->second));
+  if (auto iter = Lookup.find(color); iter != Lookup.end())
+    return ToRGBAHex(GetSysSkColor(iter->second));
 
   thrower.ThrowError("Unknown color: " + color);
   return "";
@@ -165,8 +160,9 @@ void SystemPreferences::InitializeWindow() {
   // Creating this listener before the app is ready causes global shortcuts
   // to not fire
   if (Browser::Get()->is_ready())
-    color_change_listener_ =
-        std::make_unique<gfx::ScopedSysColorChangeListener>(this);
+    hwnd_subscription_ =
+        gfx::SingletonHwnd::GetInstance()->RegisterCallback(base::BindRepeating(
+            &SystemPreferences::OnWndProc, base::Unretained(this)));
   else
     Browser::Get()->AddObserver(this);
 
@@ -205,7 +201,7 @@ LRESULT CALLBACK SystemPreferences::WndProc(HWND hwnd,
                                             WPARAM wparam,
                                             LPARAM lparam) {
   if (message == WM_DWMCOLORIZATIONCOLORCHANGED) {
-    DWORD new_color = (DWORD)wparam;
+    DWORD new_color = static_cast<DWORD>(wparam);
     std::string new_color_string = hexColorDWORDToRGBA(new_color);
     if (new_color_string != current_color_) {
       Emit("accent-color-changed", hexColorDWORDToRGBA(new_color));
@@ -215,13 +211,21 @@ LRESULT CALLBACK SystemPreferences::WndProc(HWND hwnd,
   return ::DefWindowProc(hwnd, message, wparam, lparam);
 }
 
-void SystemPreferences::OnSysColorChange() {
+void SystemPreferences::OnWndProc(HWND hwnd,
+                                  UINT message,
+                                  WPARAM wparam,
+                                  LPARAM lparam) {
+  if (message != WM_SYSCOLORCHANGE &&
+      (message != WM_SETTINGCHANGE || wparam != SPI_SETHIGHCONTRAST)) {
+    return;
+  }
   Emit("color-changed");
 }
 
-void SystemPreferences::OnFinishLaunching(base::Value::Dict launch_info) {
-  color_change_listener_ =
-      std::make_unique<gfx::ScopedSysColorChangeListener>(this);
+void SystemPreferences::OnFinishLaunching(base::DictValue launch_info) {
+  hwnd_subscription_ =
+      gfx::SingletonHwnd::GetInstance()->RegisterCallback(base::BindRepeating(
+          &SystemPreferences::OnWndProc, base::Unretained(this)));
 }
 
 }  // namespace api

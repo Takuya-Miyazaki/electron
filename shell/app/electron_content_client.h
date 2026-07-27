@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "content/public/common/content_client.h"
+#include "url/origin.h"
 
 namespace electron {
 
@@ -29,10 +30,15 @@ class ElectronContentClient : public content::ContentClient {
   gfx::Image& GetNativeImageNamed(int resource_id) override;
   base::RefCountedMemory* GetDataResourceBytes(int resource_id) override;
   void AddAdditionalSchemes(Schemes* schemes) override;
-  void AddPlugins(std::vector<content::ContentPluginInfo>* plugins) override;
+  void AddPlugins(std::vector<content::WebPluginInfo>* plugins) override;
   void AddContentDecryptionModules(
       std::vector<content::CdmInfo>* cdms,
       std::vector<media::CdmHostFilePath>* cdm_host_file_paths) override;
+  bool IsFilePickerAllowedForCrossOriginSubframe(
+      const url::Origin& origin) override;
+  void ExposeInterfacesToBrowser(
+      scoped_refptr<base::SequencedTaskRunner> io_task_runner,
+      mojo::BinderMap* binders) override;
 };
 
 }  // namespace electron

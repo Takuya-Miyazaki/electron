@@ -6,8 +6,8 @@ on:
       build-image-sha:
         type: string
         description: 'SHA for electron/build image'
-        default: 'bc2f48b2415a670de18d13605b1cf0eb5fdbaae1'
-        required: true
+        default: ''
+        required: false
       upload-to-storage:
         description: 'Uploads to Azure storage'
         required: false
@@ -18,20 +18,41 @@ on:
         type: boolean
         default: false
 
+permissions: {}
+
 jobs:
+  setup:
+    if: github.repository == 'electron/electron'
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+    outputs:
+      build-image-sha: ${{ steps.build-image-sha.outputs.build-image-sha }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - name: Set Build Image SHA
+      id: build-image-sha
+      uses: ./.github/actions/build-image-sha
+      with:
+        override: ${{ inputs.build-image-sha }}
+
   checkout-macos:
-    runs-on: electron-arc-linux-amd64-32core
+    needs: setup
+    runs-on: electron-arc-centralus-linux-amd64-32core
+    permissions:
+      contents: read
     container:
-      image: ghcr.io/electron/build:${{ inputs.build-image-sha }}
+      image: ghcr.io/electron/build:${{ needs.setup.outputs.build-image-sha }}
       options: --user root
       volumes:
         - /mnt/cross-instance-cache:/mnt/cross-instance-cache
         - /var/run/sas:/var/run/sas
     env:
+      CHROMIUM_GIT_COOKIE: ${{ secrets.CHROMIUM_GIT_COOKIE }}
       GCLIENT_EXTRA_ARGS: '--custom-var=checkout_mac=True --custom-var=host_os=mac'
     steps:
     - name: Checkout Electron
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
         path: src/electron
         fetch-depth: 0
@@ -39,62 +60,96 @@ jobs:
       uses: ./src/electron/.github/actions/checkout
       with:
         generate-sas-token: 'true'
+        target-platform: macos
+
+  # Build the patched siso binaries in parallel with checkout-macos; the
+  # publish jobs consume the darwin-arm64 artifact via SISO_PATH (macOS builds,
+  # x64 and arm64, run on arm64 hosts).
+  build-siso:
+    needs: setup
+    uses: ./.github/workflows/pipeline-segment-build-siso.yml
+    permissions:
+      contents: read
 
   publish-x64-darwin:
-    uses: ./.github/workflows/pipeline-segment-electron-build.yml
-    needs: checkout-macos
+    uses: ./.github/workflows/pipeline-segment-electron-publish.yml
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    needs: [checkout-macos, build-siso]
     with:
       environment: production-release
-      build-runs-on: macos-14-xlarge
+      build-runs-on: macos-15-xlarge
       target-platform: macos
       target-arch: x64
       target-variant: darwin
       is-release: true
+      publish: true
       gn-build-type: release
       generate-symbols: true
       upload-to-storage: ${{ inputs.upload-to-storage }}
     secrets: inherit
 
   publish-x64-mas:
-    uses: ./.github/workflows/pipeline-segment-electron-build.yml
-    needs: checkout-macos
+    uses: ./.github/workflows/pipeline-segment-electron-publish.yml
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    needs: [checkout-macos, build-siso]
     with:
       environment: production-release
-      build-runs-on: macos-14-xlarge
+      build-runs-on: macos-15-xlarge
       target-platform: macos
       target-arch: x64
       target-variant: mas
       is-release: true
+      publish: true
       gn-build-type: release
       generate-symbols: true
       upload-to-storage: ${{ inputs.upload-to-storage }}
     secrets: inherit
 
   publish-arm64-darwin:
-    uses: ./.github/workflows/pipeline-segment-electron-build.yml
-    needs: checkout-macos
+    uses: ./.github/workflows/pipeline-segment-electron-publish.yml
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    needs: [checkout-macos, build-siso]
     with:
       environment: production-release
-      build-runs-on: macos-14-xlarge
+      build-runs-on: macos-15-xlarge
       target-platform: macos
       target-arch: arm64
       target-variant: darwin
       is-release: true
+      publish: true
       gn-build-type: release
       generate-symbols: true
       upload-to-storage: ${{ inputs.upload-to-storage }}
     secrets: inherit
 
   publish-arm64-mas:
-    uses: ./.github/workflows/pipeline-segment-electron-build.yml
-    needs: checkout-macos
+    uses: ./.github/workflows/pipeline-segment-electron-publish.yml
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    needs: [checkout-macos, build-siso]
     with:
       environment: production-release
-      build-runs-on: macos-14-xlarge
+      build-runs-on: macos-15-xlarge
       target-platform: macos
       target-arch: arm64
       target-variant: mas
       is-release: true
+      publish: true
       gn-build-type: release
       generate-symbols: true
       upload-to-storage: ${{ inputs.upload-to-storage }}

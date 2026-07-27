@@ -14,7 +14,6 @@
 #include "base/command_line.h"
 #include "base/feature_list.h"
 #include "base/i18n/rtl.h"
-#include "base/metrics/field_trial.h"
 #include "base/nix/xdg_util.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
@@ -42,6 +41,7 @@
 #include "content/public/common/process_type.h"
 #include "content/public/common/result_codes.h"
 #include "electron/buildflags/buildflags.h"
+#include "electron/fuses.h"
 #include "media/base/localized_strings.h"
 #include "services/network/public/cpp/features.h"
 #include "services/tracing/public/cpp/stack_sampling/tracing_sampler_profiler.h"
@@ -63,11 +63,13 @@
 #include "shell/common/logging.h"
 #include "shell/common/node_bindings.h"
 #include "shell/common/node_includes.h"
+#include "shell/common/v8_util.h"
 #include "ui/base/idle/idle.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/ui_base_switches.h"
 #include "ui/color/color_provider_manager.h"
 #include "ui/display/screen.h"
+#include "ui/linux/display_server_utils.h"
 #include "ui/views/layout/layout_provider.h"
 #include "url/url_util.h"
 
@@ -101,7 +103,7 @@
 #endif
 
 #if BUILDFLAG(IS_MAC)
-#include "components/os_crypt/sync/keychain_password_mac.h"
+#include "components/os_crypt/common/keychain_password_mac.h"
 #include "shell/browser/ui/cocoa/views_delegate_mac.h"
 #else
 #include "shell/browser/ui/views/electron_views_delegate.h"
@@ -124,6 +126,10 @@
 #include "content/public/browser/plugin_service.h"
 #include "shell/common/plugin_info.h"
 #endif  // BUILDFLAG(ENABLE_PLUGINS)
+
+#if BUILDFLAG(ENABLE_PRINTING)
+#include "components/printing/common/print_dialog_linux_factory.h"
+#endif
 
 namespace electron {
 
@@ -205,13 +211,8 @@ int ElectronBrowserMainParts::GetExitCode() const {
 }
 
 int ElectronBrowserMainParts::PreEarlyInitialization() {
-  field_trial_list_ = std::make_unique<base::FieldTrialList>();
 #if BUILDFLAG(IS_POSIX)
   HandleSIGCHLD();
-#endif
-#if BUILDFLAG(IS_LINUX)
-  DetectOzonePlatform();
-  ui::OzonePlatform::PreEarlyInitialization();
 #endif
 #if BUILDFLAG(IS_MAC)
   screen_ = std::make_unique<display::ScopedNativeScreen>();
@@ -228,16 +229,39 @@ void ElectronBrowserMainParts::PostEarlyInitialization() {
   // set.  If this check is failing we may need to re-add that workaround
   DCHECK(base::SingleThreadTaskRunner::HasCurrentDefault());
 
+  // Enable trap handlers before creating the V8 isolate. V8 initialization
+  // calls IsTrapHandlerEnabled() which prevents later EnableTrapHandler calls.
+#if ((BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)) && \
+     defined(ARCH_CPU_X86_64)) ||                                       \
+    ((BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC)) && defined(ARCH_CPU_ARM64))
+  if (electron::fuses::IsWasmTrapHandlersEnabled()) {
+    electron::SetUpWebAssemblyTrapHandler();
+  }
+#endif
+
   // The ProxyResolverV8 has setup a complete V8 environment, in order to
   // avoid conflicts we only initialize our V8 environment after that.
   js_env_ = std::make_unique<JavascriptEnvironment>(node_bindings_->uv_loop());
 
-  v8::HandleScope scope(js_env_->isolate());
+  v8::Isolate* const isolate = js_env_->isolate();
+  v8::HandleScope scope(isolate);
 
-  node_bindings_->Initialize(js_env_->isolate()->GetCurrentContext());
+  // Electron: when the embedded Node startup snapshot is being consumed,
+  // JavascriptEnvironment did not create a context (it comes from
+  // Context::FromSnapshot inside node::CreateEnvironment) -- pass empty.
+  v8::Local<v8::Context> context = isolate->GetCurrentContext();
+
+  node_bindings_->Initialize(isolate, context);
   // Create the global environment.
   node_env_ = node_bindings_->CreateEnvironment(
-      js_env_->isolate()->GetCurrentContext(), js_env_->platform());
+      isolate, context, js_env_->platform(),
+      js_env_->max_young_generation_size_in_bytes());
+
+  // Enter the snapshot-deserialized main context (it was created inside
+  // CreateEnvironment, not in JavascriptEnvironment's ctor).
+  if (context.IsEmpty()) {
+    node_env_->context()->Enter();
+  }
 
   node_env_->set_trace_sync_io(node_env_->options()->trace_sync_io);
 
@@ -245,7 +269,7 @@ void ElectronBrowserMainParts::PostEarlyInitialization() {
   node_env_->options()->unhandled_rejections = "warn-with-error-code";
 
   // Add Electron extended APIs.
-  electron_bindings_->BindTo(js_env_->isolate(), node_env_->process_object());
+  electron_bindings_->BindTo(isolate, node_env_->process_object());
 
   // Create explicit microtasks runner.
   js_env_->CreateMicrotasksRunner();
@@ -307,9 +331,7 @@ int ElectronBrowserMainParts::PreCreateThreads() {
   auto env = base::Environment::Create();
   std::optional<std::string> lc_all;
   if (!locale.empty()) {
-    std::string str;
-    if (env->GetVar("LC_ALL", &str))
-      lc_all.emplace(std::move(str));
+    lc_all = env->GetVar("LC_ALL");
     env->SetVar("LC_ALL", locale);
   }
 #endif
@@ -320,7 +342,7 @@ int ElectronBrowserMainParts::PreCreateThreads() {
 #if defined(USE_AURA)
   // NB: must be called _after_ locale resource bundle is loaded,
   // because ui lib makes use of it in X11
-  if (!display::Screen::GetScreen()) {
+  if (!display::Screen::Get()) {
     screen_ = views::CreateDesktopScreen();
   }
 #endif
@@ -339,9 +361,6 @@ int ElectronBrowserMainParts::PreCreateThreads() {
       env->UnSetVar("LC_ALL");
   }
 #endif
-
-  // Force MediaCaptureDevicesDispatcher to be created on UI thread.
-  MediaCaptureDevicesDispatcher::GetInstance();
 
   // Force MediaCaptureDevicesDispatcher to be created on UI thread.
   MediaCaptureDevicesDispatcher::GetInstance();
@@ -370,10 +389,9 @@ void ElectronBrowserMainParts::PostCreateThreads() {
   // Separate the WebPluginInfo registration for these processes.
   std::vector<content::WebPluginInfo> plugins;
   auto* plugin_service = content::PluginService::GetInstance();
-  plugin_service->RefreshPlugins();
   GetInternalPlugins(&plugins);
   for (const auto& plugin : plugins)
-    plugin_service->RegisterInternalPlugin(plugin, true);
+    plugin_service->RegisterInternalPlugin(plugin);
 #endif
 }
 
@@ -404,6 +422,10 @@ void ElectronBrowserMainParts::ToolkitInitialized() {
   dark_mode_manager_ = std::make_unique<ui::DarkModeManagerLinux>();
 
   ui::LinuxUi::SetInstance(linux_ui);
+
+#if BUILDFLAG(ENABLE_PRINTING)
+  print_dialog_factory_ = std::make_unique<printing::PrintDialogLinuxFactory>();
+#endif
 
   // Cursor theme changes are tracked by LinuxUI (via a CursorThemeManager
   // implementation). Start observing them once it's initialized.
@@ -442,6 +464,7 @@ int ElectronBrowserMainParts::PreMainMessageLoopRun() {
   // BrowserContextKeyedAPIServiceFactories require an ExtensionsBrowserClient.
   extensions_browser_client_ =
       std::make_unique<ElectronExtensionsBrowserClient>();
+  extensions_browser_client_->Init();
   extensions::ExtensionsBrowserClient::Set(extensions_browser_client_.get());
 
   extensions::EnsureBrowserContextKeyedServiceFactoriesBuilt();
@@ -469,16 +492,16 @@ int ElectronBrowserMainParts::PreMainMessageLoopRun() {
     DevToolsManagerDelegate::StartHttpHandler();
   }
 
+  fake_browser_process_->PreMainMessageLoopRun();
+
 #if !BUILDFLAG(IS_MAC)
   // The corresponding call in macOS is in ElectronApplicationDelegate.
   Browser::Get()->WillFinishLaunching();
-  Browser::Get()->DidFinishLaunching(base::Value::Dict());
+  Browser::Get()->DidFinishLaunching(base::DictValue());
 #endif
 
   // Notify observers that main thread message loop was initialized.
   Browser::Get()->PreMainMessageLoopRun();
-
-  fake_browser_process_->PreMainMessageLoopRun();
 
 #if BUILDFLAG(IS_WIN)
   ui::SelectFileDialog::SetFactory(
@@ -556,11 +579,9 @@ void ElectronBrowserMainParts::PostMainMessageLoopRun() {
 
   // Shutdown the DownloadManager before destroying Node to prevent
   // DownloadItem callbacks from crashing.
-  for (auto& iter : ElectronBrowserContext::browser_context_map()) {
-    auto* download_manager = iter.second.get()->GetDownloadManager();
-    if (download_manager) {
+  for (auto* browser_context : ElectronBrowserContext::BrowserContexts()) {
+    if (auto* download_manager = browser_context->GetDownloadManager())
       download_manager->Shutdown();
-    }
   }
 
   // Shutdown utility process created with Electron API before
@@ -585,7 +606,7 @@ void ElectronBrowserMainParts::PostMainMessageLoopRun() {
       auto& process = it.GetData().GetProcess();
       if (!process.IsValid())
         continue;
-      auto utility_process_wrapper =
+      auto* utility_process_wrapper =
           api::UtilityProcessWrapper::FromProcessId(process.Pid());
       if (utility_process_wrapper)
         utility_process_wrapper->Shutdown(0 /* exit_code */);
@@ -600,11 +621,9 @@ void ElectronBrowserMainParts::PostMainMessageLoopRun() {
   node_bindings_->set_uv_env(nullptr);
   node_env_.reset();
 
-  auto default_context_key = ElectronBrowserContext::PartitionKey("", false);
-  std::unique_ptr<ElectronBrowserContext> default_context = std::move(
-      ElectronBrowserContext::browser_context_map()[default_context_key]);
-  ElectronBrowserContext::browser_context_map().clear();
-  default_context.reset();
+  browser_.reset();
+  js_env_.reset();
+  ElectronBrowserContext::DestroyAllContexts();
 
   fake_browser_process_->PostMainMessageLoopRun();
   content::DevToolsAgentHost::StopRemoteDebuggingPipeHandler();

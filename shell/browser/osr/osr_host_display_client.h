@@ -14,7 +14,7 @@
 #include "shell/browser/osr/osr_paint_event.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "third_party/skia/include/core/SkCanvas.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 
 class SkBitmap;
 class SkCanvas;
@@ -67,7 +67,7 @@ class OffScreenHostDisplayClient : public viz::HostDisplayClient {
   // viz::HostDisplayClient
 #if BUILDFLAG(IS_MAC)
   void OnDisplayReceivedCALayerParams(
-      const gfx::CALayerParams& ca_layer_params) override;
+      gfx::CALayerParams ca_layer_params) override;
 #endif
 
   void CreateLayeredWindowUpdater(

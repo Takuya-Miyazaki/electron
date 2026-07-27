@@ -12,14 +12,12 @@
 #include "base/path_service.h"
 #include "chrome/browser/extensions/chrome_url_request_util.h"
 #include "chrome/common/chrome_paths.h"
-#include "chrome/common/extensions/chrome_manifest_url_handlers.h"
 #include "components/version_info/version_info.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/frame_tree_node_id.h"
 #include "content/public/browser/render_frame_host.h"
-#include "content/public/common/user_agent.h"
 #include "extensions/browser/api/core_extensions_browser_api_provider.h"
 #include "extensions/browser/api/extensions_api_client.h"
 #include "extensions/browser/component_extension_resource_manager.h"
@@ -27,13 +25,17 @@
 #include "extensions/browser/extension_protocols.h"
 #include "extensions/browser/extensions_browser_interface_binders.h"
 #include "extensions/browser/null_app_sorting.h"
+#include "extensions/browser/safe_browsing_delegate.h"
 #include "extensions/browser/updater/null_extension_cache.h"
 #include "extensions/browser/url_request_util.h"
 #include "extensions/common/features/feature_channel.h"
 #include "extensions/common/file_util.h"
 #include "extensions/common/manifest_constants.h"
-#include "extensions/common/manifest_url_handlers.h"
+#include "extensions/common/manifest_handlers/chrome_url_overrides_handler.h"
+#include "extensions/common/manifest_handlers/devtools_page_handler.h"
+#include "extensions/common/manifest_handlers/manifest_url_handlers.h"
 #include "services/network/public/mojom/url_loader.mojom.h"
+#include "shell/browser/api/electron_api_web_contents.h"
 #include "shell/browser/browser.h"
 #include "shell/browser/electron_browser_client.h"
 #include "shell/browser/electron_browser_context.h"
@@ -41,11 +43,11 @@
 #include "shell/browser/extensions/electron_component_extension_resource_manager.h"
 #include "shell/browser/extensions/electron_extension_host_delegate.h"
 #include "shell/browser/extensions/electron_extension_system_factory.h"
+#include "shell/browser/extensions/electron_extension_tab_util.h"
 #include "shell/browser/extensions/electron_extension_web_contents_observer.h"
 #include "shell/browser/extensions/electron_extensions_api_client.h"
 #include "shell/browser/extensions/electron_extensions_browser_api_provider.h"
 #include "shell/browser/extensions/electron_kiosk_delegate.h"
-#include "shell/browser/extensions/electron_navigation_ui_data.h"
 #include "shell/browser/extensions/electron_process_manager_delegate.h"
 #include "ui/base/resource/resource_bundle.h"
 
@@ -56,23 +58,28 @@ using extensions::ExtensionsBrowserClient;
 namespace electron {
 
 ElectronExtensionsBrowserClient::ElectronExtensionsBrowserClient()
-    : api_client_(std::make_unique<extensions::ElectronExtensionsAPIClient>()),
-      process_manager_delegate_(
-          std::make_unique<extensions::ElectronProcessManagerDelegate>()),
-      extension_cache_(std::make_unique<extensions::NullExtensionCache>()) {
-  // Electron does not have a concept of channel, so leave UNKNOWN to
-  // enable all channel-dependent extension APIs.
-  extensions::SetCurrentChannel(version_info::Channel::UNKNOWN);
-  resource_manager_ =
-      std::make_unique<extensions::ElectronComponentExtensionResourceManager>();
-
+    : extension_cache_(std::make_unique<extensions::NullExtensionCache>()),
+      safe_browsing_delegate_(
+          std::make_unique<extensions::SafeBrowsingDelegate>()) {
   AddAPIProvider(
       std::make_unique<extensions::CoreExtensionsBrowserAPIProvider>());
   AddAPIProvider(
       std::make_unique<extensions::ElectronExtensionsBrowserAPIProvider>());
+
+  // Electron does not have a concept of channel, so leave UNKNOWN to
+  // enable all channel-dependent extension APIs.
+  extensions::SetCurrentChannel(version_info::Channel::UNKNOWN);
 }
 
 ElectronExtensionsBrowserClient::~ElectronExtensionsBrowserClient() = default;
+
+void ElectronExtensionsBrowserClient::Init() {
+  process_manager_delegate_ =
+      std::make_unique<extensions::ElectronProcessManagerDelegate>();
+  api_client_ = std::make_unique<extensions::ElectronExtensionsAPIClient>();
+  resource_manager_ =
+      std::make_unique<extensions::ElectronComponentExtensionResourceManager>();
+}
 
 bool ElectronExtensionsBrowserClient::IsShuttingDown() {
   return electron::Browser::Get()->is_shutting_down();
@@ -85,12 +92,7 @@ bool ElectronExtensionsBrowserClient::AreExtensionsDisabled(
 }
 
 bool ElectronExtensionsBrowserClient::IsValidContext(void* context) {
-  auto& context_map = ElectronBrowserContext::browser_context_map();
-  for (auto const& entry : context_map) {
-    if (entry.second && entry.second.get() == context)
-      return true;
-  }
-  return false;
+  return ElectronBrowserContext::IsValidContext(context);
 }
 
 bool ElectronExtensionsBrowserClient::IsSameContext(BrowserContext* first,
@@ -113,7 +115,7 @@ BrowserContext* ElectronExtensionsBrowserClient::GetOriginalContext(
     BrowserContext* context) {
   DCHECK(context);
   if (context->IsOffTheRecord()) {
-    return ElectronBrowserContext::From("", false);
+    return ElectronBrowserContext::GetDefaultBrowserContext();
   } else {
     return context;
   }
@@ -122,6 +124,12 @@ BrowserContext* ElectronExtensionsBrowserClient::GetOriginalContext(
 content::BrowserContext*
 ElectronExtensionsBrowserClient::GetContextRedirectedToOriginal(
     content::BrowserContext* context) {
+  return GetOriginalContext(context);
+}
+
+content::BrowserContext* ElectronExtensionsBrowserClient::
+    GetContextRedirectedToOriginalWithoutAshInternals(
+        content::BrowserContext* context) {
   return GetOriginalContext(context);
 }
 
@@ -148,6 +156,12 @@ bool ElectronExtensionsBrowserClient::IsGuestSession(
 
 bool ElectronExtensionsBrowserClient::IsExtensionIncognitoEnabled(
     const std::string& extension_id,
+    content::BrowserContext* context) const {
+  return false;
+}
+
+bool ElectronExtensionsBrowserClient::IsExtensionIncognitoEnabled(
+    const extensions::Extension* extension,
     content::BrowserContext* context) const {
   return false;
 }
@@ -193,10 +207,11 @@ void ElectronExtensionsBrowserClient::LoadResourceFromResourceBundle(
     const base::FilePath& resource_relative_path,
     int resource_id,
     scoped_refptr<net::HttpResponseHeaders> headers,
-    mojo::PendingRemote<network::mojom::URLLoaderClient> client) {
+    mojo::PendingRemote<network::mojom::URLLoaderClient> client,
+    content::BrowserContext* browser_context) {
   extensions::chrome_url_request_util::LoadResourceFromResourceBundle(
       request, std::move(loader), resource_relative_path, resource_id,
-      std::move(headers), std::move(client));
+      std::move(headers), std::move(client), browser_context);
 }
 
 namespace {
@@ -204,7 +219,7 @@ bool AllowCrossRendererResourceLoad(
     const network::ResourceRequest& request,
     network::mojom::RequestDestination destination,
     ui::PageTransition page_transition,
-    int child_id,
+    content::ChildProcessId child_id,
     bool is_incognito,
     const extensions::Extension* extension,
     const extensions::ExtensionSet& extensions,
@@ -235,7 +250,7 @@ bool ElectronExtensionsBrowserClient::AllowCrossRendererResourceLoad(
     const network::ResourceRequest& request,
     network::mojom::RequestDestination destination,
     ui::PageTransition page_transition,
-    int child_id,
+    content::ChildProcessId child_id,
     bool is_incognito,
     const extensions::Extension* extension,
     const extensions::ExtensionSet& extensions,
@@ -250,11 +265,6 @@ bool ElectronExtensionsBrowserClient::AllowCrossRendererResourceLoad(
 
   // Couldn't determine if resource is allowed. Block the load.
   return false;
-}
-
-PrefService* ElectronExtensionsBrowserClient::GetPrefServiceForContext(
-    BrowserContext* context) {
-  return static_cast<ElectronBrowserContext*>(context)->prefs();
 }
 
 void ElectronExtensionsBrowserClient::GetEarlyExtensionPrefsObservers(
@@ -329,7 +339,7 @@ ElectronExtensionsBrowserClient::GetComponentExtensionResourceManager() {
 void ElectronExtensionsBrowserClient::BroadcastEventToRenderers(
     extensions::events::HistogramValue histogram_value,
     const std::string& event_name,
-    base::Value::List args,
+    base::ListValue args,
     bool dispatch_to_off_the_record_profiles) {
   if (!BrowserThread::CurrentlyOn(BrowserThread::UI)) {
     content::GetUIThreadTaskRunner({})->PostTask(
@@ -341,13 +351,10 @@ void ElectronExtensionsBrowserClient::BroadcastEventToRenderers(
     return;
   }
 
-  for (auto const& [key, browser_context] :
-       ElectronBrowserContext::browser_context_map()) {
-    if (browser_context) {
-      extensions::EventRouter::Get(browser_context.get())
-          ->BroadcastEvent(std::make_unique<extensions::Event>(
-              histogram_value, event_name, args.Clone()));
-    }
+  for (auto* browser_context : ElectronBrowserContext::BrowserContexts()) {
+    extensions::EventRouter::Get(browser_context)
+        ->BroadcastEvent(std::make_unique<extensions::Event>(
+            histogram_value, event_name, args.Clone()));
   }
 }
 
@@ -383,18 +390,41 @@ ElectronExtensionsBrowserClient::GetExtensionWebContentsObserver(
       web_contents);
 }
 
+bool ElectronExtensionsBrowserClient::IsValidTabId(
+    content::BrowserContext* browser_context,
+    const int tab_id,
+    const bool include_incognito,
+    content::WebContents** web_contents) const {
+  auto* contents = extensions::GetElectronTabById(tab_id, browser_context);
+  if (!contents)
+    return false;
+
+  if (web_contents)
+    *web_contents = contents->web_contents();
+
+  return true;
+}
+
+extensions::ScriptExecutor*
+ElectronExtensionsBrowserClient::GetScriptExecutorForTab(
+    content::WebContents& web_contents) {
+  auto* contents = electron::api::WebContents::From(&web_contents);
+  return contents ? contents->script_executor() : nullptr;
+}
+
 extensions::KioskDelegate* ElectronExtensionsBrowserClient::GetKioskDelegate() {
   if (!kiosk_delegate_)
     kiosk_delegate_ = std::make_unique<ElectronKioskDelegate>();
   return kiosk_delegate_.get();
 }
 
-std::string ElectronExtensionsBrowserClient::GetApplicationLocale() {
-  return ElectronBrowserClient::Get()->GetApplicationLocale();
+extensions::SafeBrowsingDelegate*
+ElectronExtensionsBrowserClient::GetSafeBrowsingDelegate() {
+  return safe_browsing_delegate_.get();
 }
 
-std::string ElectronExtensionsBrowserClient::GetUserAgent() const {
-  return ElectronBrowserClient::Get()->GetUserAgent();
+std::string ElectronExtensionsBrowserClient::GetApplicationLocale() {
+  return ElectronBrowserClient::Get()->GetApplicationLocale();
 }
 
 void ElectronExtensionsBrowserClient::RegisterBrowserInterfaceBindersForFrame(

@@ -96,30 +96,32 @@ void AutofillAgent::TextFieldDidEndEditing(const blink::WebInputElement&) {
   HidePopup();
 }
 
-void AutofillAgent::TextFieldDidChange(
+void AutofillAgent::TextFieldValueChanged(
     const blink::WebFormControlElement& element) {
   if (!IsUserGesture() && !render_frame()->IsPasting())
     return;
 
   weak_ptr_factory_.InvalidateWeakPtrs();
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-      FROM_HERE, base::BindOnce(&AutofillAgent::TextFieldDidChangeImpl,
+      FROM_HERE, base::BindOnce(&AutofillAgent::TextFieldValueChangedImpl,
                                 weak_ptr_factory_.GetWeakPtr(), element));
 }
 
-void AutofillAgent::TextFieldDidChangeImpl(
+void AutofillAgent::TextFieldValueChangedImpl(
     const blink::WebFormControlElement& element) {
   ShowSuggestions(element, {.requires_caret_at_end = true});
 }
 
-void AutofillAgent::TextFieldDidReceiveKeyDown(
-    const blink::WebInputElement& element,
-    const blink::WebKeyboardEvent& event) {
-  if (event.windows_key_code == ui::VKEY_DOWN ||
-      event.windows_key_code == ui::VKEY_UP) {
-    ShowSuggestions(element, {.autofill_on_empty_values = true,
-                              .requires_caret_at_end = true});
+bool AutofillAgent::DidReceiveKeyDown(const blink::WebElement& element,
+                                      const blink::WebKeyboardEvent& event) {
+  if (auto input_element = element.DynamicTo<blink::WebInputElement>();
+      input_element && input_element.IsTextField() &&
+      (event.windows_key_code == ui::VKEY_DOWN ||
+       event.windows_key_code == ui::VKEY_UP)) {
+    ShowSuggestions(input_element, {.autofill_on_empty_values = true,
+                                    .requires_caret_at_end = true});
   }
+  return false;
 }
 
 void AutofillAgent::OpenTextDataListChooser(
@@ -171,6 +173,14 @@ void AutofillAgent::ShowSuggestions(const blink::WebFormControlElement& element,
     GetDataListSuggestions(input_element, &data_list_values, &data_list_labels);
   }
 
+  // With no suggestions there is nothing to show; hide any existing popup
+  // instead of asking the browser process to rebuild the native popup
+  // window for an empty list.
+  if (data_list_values.empty()) {
+    HidePopup();
+    return;
+  }
+
   ShowPopup(element, data_list_values, data_list_labels);
 }
 
@@ -206,7 +216,7 @@ void AutofillAgent::AcceptDataListSuggestion(const std::u16string& suggestion) {
     blink::WebInputElement input_element =
         element.DynamicTo<blink::WebInputElement>();
     if (!input_element.IsNull())
-      input_element.SetAutofillValue(blink::WebString::FromUTF16(suggestion));
+      input_element.SetAutofillValue(blink::WebString::FromUtf16(suggestion));
   }
 }
 

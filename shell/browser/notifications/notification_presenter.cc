@@ -27,13 +27,8 @@ base::WeakPtr<Notification> NotificationPresenter::CreateNotification(
 }
 
 void NotificationPresenter::RemoveNotification(Notification* notification) {
-  auto it = notifications_.find(notification);
-  if (it == notifications_.end()) {
-    return;
-  }
-
-  notifications_.erase(notification);
-  delete notification;
+  if (const auto nh = notifications_.extract(notification))
+    delete nh.value();
 }
 
 void NotificationPresenter::CloseNotificationWithId(
@@ -47,6 +42,26 @@ void NotificationPresenter::CloseNotificationWithId(
     notification->Dismiss();
     notifications_.erase(notification);
   }
+}
+
+void NotificationPresenter::GetDeliveredNotifications(
+    GetDeliveredNotificationsCallback callback) {
+  // Default: return empty list. Overridden on macOS.
+  std::move(callback).Run({});
+}
+
+void NotificationPresenter::RemoveDeliveredNotifications(
+    const std::vector<std::string>& identifiers) {
+  // Default: no-op. Overridden on macOS.
+}
+
+void NotificationPresenter::RemoveAllDeliveredNotifications() {
+  // Default: no-op. Overridden on macOS.
+}
+
+void NotificationPresenter::RemoveDeliveredNotificationsByGroupId(
+    const std::string& group_id) {
+  // Default: no-op. Overridden on macOS.
 }
 
 }  // namespace electron

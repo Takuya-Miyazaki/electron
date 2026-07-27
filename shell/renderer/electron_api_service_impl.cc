@@ -4,9 +4,7 @@
 
 #include "electron/shell/renderer/electron_api_service_impl.h"
 
-#include <memory>
 #include <string_view>
-#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -17,83 +15,35 @@
 #include "shell/common/gin_converters/blink_converter.h"
 #include "shell/common/gin_converters/value_converter.h"
 #include "shell/common/heap_snapshot.h"
-#include "shell/common/node_includes.h"
 #include "shell/common/options_switches.h"
 #include "shell/common/thread_restrictions.h"
 #include "shell/common/v8_util.h"
+#include "shell/renderer/electron_ipc_native.h"
+
+#include "base/no_destructor.h"
+#include "content/public/renderer/render_thread.h"
 #include "shell/renderer/electron_render_frame_observer.h"
 #include "shell/renderer/renderer_client_base.h"
+#include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
 #include "third_party/blink/public/mojom/frame/user_activation_notification_type.mojom-shared.h"
 #include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
 #include "third_party/blink/public/web/blink.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "third_party/blink/public/web/web_message_port_converter.h"
+#include "v8/include/v8-context.h"
 
 namespace electron {
 
 namespace {
 
-constexpr std::string_view kIpcKey = "ipcNative";
-
-// Gets the private object under kIpcKey
-v8::Local<v8::Object> GetIpcObject(v8::Local<v8::Context> context) {
-  auto* isolate = context->GetIsolate();
-  auto binding_key = gin::StringToV8(isolate, kIpcKey);
-  auto private_binding_key = v8::Private::ForApi(isolate, binding_key);
-  auto global_object = context->Global();
-  auto value =
-      global_object->GetPrivate(context, private_binding_key).ToLocalChecked();
-  if (value.IsEmpty() || !value->IsObject()) {
-    LOG(ERROR) << "Attempted to get the 'ipcNative' object but it was missing";
-    return {};
-  }
-  return value->ToObject(context).ToLocalChecked();
-}
-
-void InvokeIpcCallback(v8::Local<v8::Context> context,
-                       const std::string& callback_name,
-                       std::vector<v8::Local<v8::Value>> args) {
-  TRACE_EVENT0("devtools.timeline", "FunctionCall");
-  auto* isolate = context->GetIsolate();
-
-  auto ipcNative = GetIpcObject(context);
-  if (ipcNative.IsEmpty())
-    return;
-
-  // Only set up the node::CallbackScope if there's a node environment.
-  // Sandboxed renderers don't have a node environment.
-  std::unique_ptr<node::CallbackScope> callback_scope;
-  if (node::Environment::GetCurrent(context)) {
-    callback_scope = std::make_unique<node::CallbackScope>(
-        isolate, ipcNative, node::async_context{0, 0});
-  }
-
-  auto callback_key = gin::ConvertToV8(isolate, callback_name)
-                          ->ToString(context)
-                          .ToLocalChecked();
-  auto callback_value = ipcNative->Get(context, callback_key).ToLocalChecked();
-  DCHECK(callback_value->IsFunction());  // set by init.ts
-  auto callback = callback_value.As<v8::Function>();
-  std::ignore = callback->Call(context, ipcNative, args.size(), args.data());
-}
-
-void EmitIPCEvent(v8::Local<v8::Context> context,
-                  bool internal,
-                  const std::string& channel,
-                  std::vector<v8::Local<v8::Value>> ports,
-                  v8::Local<v8::Value> args) {
-  auto* isolate = context->GetIsolate();
-
-  v8::HandleScope handle_scope(isolate);
-  v8::Context::Scope context_scope(context);
-  v8::MicrotasksScope script_scope(isolate, context->GetMicrotaskQueue(),
-                                   v8::MicrotasksScope::kRunMicrotasks);
-
-  std::vector<v8::Local<v8::Value>> argv = {
-      gin::ConvertToV8(isolate, internal), gin::ConvertToV8(isolate, channel),
-      gin::ConvertToV8(isolate, ports), args};
-
-  InvokeIpcCallback(context, "onMessage", argv);
+mojom::RendererStartupDataPtr* GetPendingNewWindowStartupData() {
+  // Process-global, no locking: set, RenderFrame creation, and take are all
+  // one synchronous call stack inside window.open() on the renderer main
+  // thread.
+  DCHECK(content::RenderThread::Get())
+      << "must be called from the renderer main thread";
+  static base::NoDestructor<mojom::RendererStartupDataPtr> pending;
+  return pending.get();
 }
 
 }  // namespace
@@ -104,9 +54,40 @@ ElectronApiServiceImpl::ElectronApiServiceImpl(
     content::RenderFrame* render_frame,
     RendererClientBase* renderer_client)
     : content::RenderFrameObserver(render_frame),
+      content::RenderFrameObserverTracker<ElectronApiServiceImpl>(render_frame),
       renderer_client_(renderer_client) {
   registry_.AddInterface<mojom::ElectronRenderer>(base::BindRepeating(
       &ElectronApiServiceImpl::BindTo, base::Unretained(this)));
+  // Associated with content.mojom.Frame, so SetStartupData() arrives before
+  // the CommitNavigation that follows it — i.e. before DidCreateScriptContext.
+  render_frame->GetAssociatedInterfaceRegistry()
+      ->AddInterface<mojom::ElectronFrameStartup>(
+          base::BindRepeating(&ElectronApiServiceImpl::BindFrameStartupReceiver,
+                              base::Unretained(this)));
+
+  // window.open() popup's about:blank fires DidCreateScriptContext before
+  // any push can land; the browser attaches its startup data to the
+  // CreateNewWindowReply and SetPendingCreateNewWindowStartupData() stashes it
+  // for us on this same call stack. The first real navigation replaces it.
+  startup_data_ = std::exchange(*GetPendingNewWindowStartupData(), nullptr);
+}
+
+// static
+void ElectronApiServiceImpl::SetPendingNewWindowStartupData(
+    mojom::RendererStartupDataPtr data) {
+  *GetPendingNewWindowStartupData() = std::move(data);
+}
+
+void ElectronApiServiceImpl::BindFrameStartupReceiver(
+    mojo::PendingAssociatedReceiver<mojom::ElectronFrameStartup> receiver) {
+  if (frame_startup_receiver_.is_bound())
+    frame_startup_receiver_.reset();
+  frame_startup_receiver_.Bind(std::move(receiver));
+}
+
+void ElectronApiServiceImpl::SetStartupData(
+    mojom::RendererStartupDataPtr data) {
+  startup_data_ = std::move(data);
 }
 
 void ElectronApiServiceImpl::BindTo(
@@ -166,7 +147,7 @@ void ElectronApiServiceImpl::Message(bool internal,
 
   v8::Local<v8::Value> args = gin::ConvertToV8(isolate, arguments);
 
-  EmitIPCEvent(context, internal, channel, {}, args);
+  ipc_native::EmitIPCEvent(isolate, context, internal, channel, {}, args);
 }
 
 void ElectronApiServiceImpl::ReceivePostMessage(
@@ -188,12 +169,13 @@ void ElectronApiServiceImpl::ReceivePostMessage(
   for (auto& port : message.ports) {
     ports.emplace_back(
         blink::WebMessagePortConverter::EntangleAndInjectMessagePortChannel(
-            context, std::move(port)));
+            isolate, context, std::move(port)));
   }
 
   std::vector<v8::Local<v8::Value>> args = {message_value};
 
-  EmitIPCEvent(context, false, channel, ports, gin::ConvertToV8(isolate, args));
+  ipc_native::EmitIPCEvent(isolate, context, false, channel, ports,
+                           gin::ConvertToV8(isolate, args));
 }
 
 void ElectronApiServiceImpl::TakeHeapSnapshot(

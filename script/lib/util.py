@@ -70,18 +70,24 @@ def make_zip(zip_file_path, files, dirs):
   safe_unlink(zip_file_path)
   if sys.platform == 'darwin':
     allfiles = files + dirs
-    execute(['zip', '-r', '-y', zip_file_path] + allfiles)
+    execute(['zip', '-r', '-y', '-9', zip_file_path] + allfiles)
   else:
     with zipfile.ZipFile(zip_file_path, "w",
                          zipfile.ZIP_DEFLATED,
                          allowZip64=True) as zip_file:
       for filename in files:
-        zip_file.write(filename, filename)
+        zip_file.write(filename, filename, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
       for dirname in dirs:
         for root, _, filenames in os.walk(dirname):
           for f in filenames:
-            zip_file.write(os.path.join(root, f))
+            zip_file.write(os.path.join(root, f), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
       zip_file.close()
+
+
+def make_tar_xz(tar_file_path, files, dirs):
+  safe_unlink(tar_file_path)
+  allfiles = files + dirs
+  execute(['tar', '-cJf', tar_file_path] + allfiles)
 
 
 def rm_rf(path):
@@ -199,22 +205,45 @@ def get_buildtools_executable(name):
     path += '.exe'
   return path
 
-def get_depot_tools_executable(name):
-  buildtools = os.path.realpath(
-    os.path.join(ELECTRON_DIR, '..', 'third_party', 'depot_tools'))
+def get_chromium_buildtools_path_value():
+  def find_depot_tools_on_path():
+    cmd = 'where' if sys.platform == 'win32' else 'which'
+    try:
+      depot_tools_path = subprocess.check_output(
+        [cmd, 'gclient'],
+        stderr=subprocess.DEVNULL, encoding='utf-8'
+      ).strip()
+      return os.path.dirname(depot_tools_path)
+    except subprocess.CalledProcessError:
+      return None
 
-  path = os.path.join(buildtools, name)
-  if sys.platform == 'win32':
-    path += '.bat'
-  return path
+  def check_for_build_tools():
+    try:
+      depot_tools_path = subprocess.check_output(
+        'electron-build-tools show depotdir',
+        shell=True, stderr=subprocess.DEVNULL, encoding='utf-8'
+      ).strip()
+      return depot_tools_path
+    except subprocess.CalledProcessError:
+      return None
 
-def get_linux_binaries():
-  return [
-    'chrome-sandbox',
-    'chrome_crashpad_handler',
-    get_electron_branding()['project_name'],
-    'libEGL.so',
-    'libGLESv2.so',
-    'libffmpeg.so',
-    'libvk_swiftshader.so',
-  ]
+  depot_tools_path = check_for_build_tools()
+  if depot_tools_path is None:
+    depot_tools_path = find_depot_tools_on_path()
+
+  if depot_tools_path is None:
+    raise RuntimeError("Couldn't find depot_tools, ensure it's on your PATH")
+
+  sys.path.append(depot_tools_path)
+  # If CHROMIUM_BUILDTOOLS_PATH is in the environment variables, remove it
+  # so we can see if we're on a version of depot_tools which doesn't need it
+  CHROMIUM_BUILDTOOLS_PATH = os.environ.pop('CHROMIUM_BUILDTOOLS_PATH', None)
+  try:
+    from gclient_paths import GetBuildtoolsPath # pylint: disable=import-outside-toplevel
+    if GetBuildtoolsPath() is None:
+      return CHROMIUM_BUILDTOOLS_PATH or os.path.join(SRC_DIR, 'buildtools')
+  finally:
+    if CHROMIUM_BUILDTOOLS_PATH:
+      os.environ['CHROMIUM_BUILDTOOLS_PATH'] = CHROMIUM_BUILDTOOLS_PATH
+
+  return None

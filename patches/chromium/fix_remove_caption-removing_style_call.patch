@@ -18,16 +18,16 @@ or resizing, but Electron does not seem to run into that issue
 for opaque frameless windows even with that block commented out.
 
 diff --git a/ui/views/win/hwnd_message_handler.cc b/ui/views/win/hwnd_message_handler.cc
-index 7e8c077edaa6b55011b0f3a3df382e2b71566bf1..ae0189bd5fb9a91f4c76081cd3eed94f79d567dd 100644
+index c7c4300744536cb3590651ac657ca207f1c212ad..ea4de3da0c46b6147b259d0f5fc6502796a17133 100644
 --- a/ui/views/win/hwnd_message_handler.cc
 +++ b/ui/views/win/hwnd_message_handler.cc
-@@ -1791,7 +1791,23 @@ LRESULT HWNDMessageHandler::OnCreate(CREATESTRUCT* create_struct) {
-   SendMessage(hwnd(), WM_CHANGEUISTATE, MAKELPARAM(UIS_CLEAR, UISF_HIDEFOCUS),
-               0);
+@@ -1975,7 +1975,23 @@ LRESULT HWNDMessageHandler::OnCreate(CREATESTRUCT* create_struct) {
+   ::SendMessage(hwnd(), WM_CHANGEUISTATE, MAKELPARAM(UIS_CLEAR, UISF_HIDEFOCUS),
+                 0);
  
 -  if (!delegate_->HasFrame()) {
 +  LONG is_popup =
-+      GetWindowLong(hwnd(), GWL_STYLE) & static_cast<LONG>(WS_POPUP);
++      ::GetWindowLong(hwnd(), GWL_STYLE) & static_cast<LONG>(WS_POPUP);
 +
 +  // For transparent windows, Electron removes the WS_CAPTION style,
 +  // so we continue to remove it here. If we didn't, an opaque rectangle
@@ -43,6 +43,6 @@ index 7e8c077edaa6b55011b0f3a3df382e2b71566bf1..ae0189bd5fb9a91f4c76081cd3eed94f
 +  // and this code path is run. The code block below runs SendFrameChanged,
 +  // which gives the dropdown options the proper layout.
 +  if (!delegate_->HasFrame() && (is_translucent_ || is_popup)) {
-     SetWindowLong(hwnd(), GWL_STYLE,
-                   GetWindowLong(hwnd(), GWL_STYLE) & ~WS_CAPTION);
+     ::SetWindowLong(hwnd(), GWL_STYLE,
+                     ::GetWindowLong(hwnd(), GWL_STYLE) & ~WS_CAPTION);
      SendFrameChanged();

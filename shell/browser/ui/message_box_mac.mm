@@ -8,8 +8,8 @@
 
 #import <Cocoa/Cocoa.h>
 
-#include "base/containers/contains.h"
 #include "base/containers/flat_map.h"
+#include "base/logging.h"
 #include "base/mac/mac_util.h"
 #include "base/no_destructor.h"
 #include "base/strings/sys_string_conversions.h"
@@ -81,7 +81,7 @@ NSAlert* CreateNSAlert(const MessageBoxSettings& settings) {
 
     // TODO(@codebytere): This behavior violates HIG & should be deprecated.
     if (settings.cancel_id == settings.default_id) {
-      [(NSButton*)[ns_buttons objectAtIndex:settings.default_id] highlight:YES];
+      [[ns_buttons objectAtIndex:settings.default_id] highlight:YES];
     }
   }
 
@@ -146,7 +146,7 @@ void ShowMessageBox(const MessageBoxSettings& settings,
         ret, alert.suppressionButton.state == NSControlStateValueOn);
   } else {
     if (settings.id) {
-      if (base::Contains(GetDialogsMap(), *settings.id))
+      if (GetDialogsMap().contains(*settings.id))
         CloseMessageBox(*settings.id);
       GetDialogsMap()[*settings.id] = alert;
     }

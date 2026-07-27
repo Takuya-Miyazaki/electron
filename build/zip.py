@@ -22,6 +22,11 @@ EXTENSIONS_TO_SKIP = [
 PATHS_TO_SKIP = [
   # Skip because it is an output of //ui/gl that we don't need.
   'angledata',
+  # Skip because ANGLE is statically linked; these are dummy stubs
+  # that upstream generates only for Chromium bot infrastructure and nothing
+  # loads them at runtime. See the TODO(crbug.com/514229803) in ui/gl/BUILD.gn.
+  './libEGL',
+  './libGLESv2',
   # Skip because these are outputs that we don't need.
   './libVkICD_mock_',
   # Skip because these are outputs that we don't need.
@@ -41,6 +46,8 @@ PATHS_TO_SKIP = [
   'resources/inspector',
   'gen/third_party/devtools-frontend/src',
   'gen/ui/webui',
+  # Skip because these get zipped separately in script/zip-symbols.py
+  'debug',
 ]
 
 def skip_path(dep, dist_zip, target_cpu):
@@ -80,6 +87,11 @@ def main(argv):
       dep = dep.strip()
       if not skip_path(dep, dist_zip, target_cpu):
         dist_files.add(dep)
+  # On Linux, filter out any files which have a .stripped companion
+  if sys.platform == 'linux':
+    dist_files = {
+      dep for dep in dist_files if f"{dep.removeprefix('./')}.stripped" not in dist_files
+    }
   if sys.platform == 'darwin' and not should_flatten:
     execute(['zip', '-r', '-y', dist_zip] + list(dist_files))
   else:
@@ -96,10 +108,13 @@ def main(argv):
           dirname = os.path.dirname(dep)
           arcname = (
             os.path.join(dirname, 'chrome-sandbox')
-            if basename == 'chrome_sandbox'
+            if basename.removesuffix('.stripped') == 'chrome_sandbox'
             else dep
           )
           name_to_write = arcname
+          # On Linux, strip the .stripped suffix from the name before zipping
+          if sys.platform == 'linux':
+            name_to_write = name_to_write.removesuffix('.stripped')
           if should_flatten:
             if flatten_relative_to:
               if name_to_write.startswith(flatten_relative_to):

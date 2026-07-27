@@ -18,14 +18,13 @@ class ElectronPDFDocumentHelperClient : public pdf::PDFDocumentHelperClient {
 
  private:
   // pdf::PDFDocumentHelperClient
-  void UpdateContentRestrictions(content::RenderFrameHost* render_frame_host,
+  void UpdateContentRestrictions(content::RenderFrameHost& render_frame_host,
                                  int content_restrictions) override;
-  void OnPDFHasUnsupportedFeature(content::WebContents* contents) override {}
-  void OnSaveURL(content::WebContents* contents) override {}
-  void SetPluginCanSave(content::RenderFrameHost* render_frame_host,
+  void OnSaveURL() override {}
+  void SetPluginCanSave(content::RenderFrameHost& render_frame_host,
                         bool can_save) override;
 #if BUILDFLAG(ENABLE_SCREEN_AI_SERVICE)
-  void OnSearchifyStarted(content::WebContents* contents) override;
+  void OnSearchifyStarted(content::RenderFrameHost& render_frame_host) override;
 #endif
 };
 

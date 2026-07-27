@@ -42,9 +42,12 @@
 #include "third_party/webrtc/modules/desktop_capture/mac/window_list_utils.h"
 #include "ui/base/hit_test.h"
 #include "ui/display/screen.h"
+#include "ui/gfx/geometry/rect_conversions.h"
 #include "ui/gl/gpu_switching_manager.h"
 #include "ui/views/background.h"
 #include "ui/views/cocoa/native_widget_mac_ns_window_host.h"
+#include "ui/views/view_targeter.h"
+#include "ui/views/view_targeter_delegate.h"
 #include "ui/views/widget/widget.h"
 #include "ui/views/window/native_frame_view_mac.h"
 
@@ -112,60 +115,94 @@ struct Converter<electron::NativeWindowMac::VisualEffectState> {
 
 }  // namespace gin
 
+namespace {
+
+// A ViewTargeterDelegate installed on content_view_ that makes it
+// hit-test-transparent except where one of its descendants covers the
+// target rect.
+//
+// In BrowserWindow, the WebContentsView is added as a sibling of
+// content_view_ at a lower z-order so that user-added child views paint
+// above web content. content_view_ itself covers the full window, so the
+// default DoesIntersectRect (a bounds check) would always return true and
+// the parent targeter would stop there, never reaching the WebContentsView
+// behind it. By only intersecting where a child actually does, the parent's
+// default TargetForRect loop skips content_view_ and falls through to the
+// sibling, ultimately resolving to the WebContentsView's NativeViewHost so
+// BridgedContentView::hitTest: routes the event to RenderWidgetHostViewCocoa.
+//
+// This must never affect TargetForRect's contract — it only narrows
+// HitTestRect, which the default loop already handles by skipping the child.
+// Returning nullptr from TargetForRect (the previous approach) violated the
+// contract and crashed RootView::UpdateCursor (see #51576).
+class ContentViewTargeterDelegate : public views::ViewTargeterDelegate {
+ public:
+  bool DoesIntersectRect(const views::View* target,
+                         const gfx::Rect& rect) const override {
+    if (!views::ViewTargeterDelegate::DoesIntersectRect(target, rect)) {
+      return false;
+    }
+    for (const views::View* child : target->children()) {
+      if (!child->GetVisible() || !child->GetCanProcessEventsWithinSubtree()) {
+        continue;
+      }
+      gfx::RectF rect_in_child(rect);
+      views::View::ConvertRectToTarget(target, child, &rect_in_child);
+      if (child->HitTestRect(gfx::ToEnclosingRect(rect_in_child))) {
+        return true;
+      }
+    }
+    return false;
+  }
+};
+
+}  // namespace
+
 namespace electron {
 
-NativeWindowMac::NativeWindowMac(const gin_helper::Dictionary& options,
-                                 NativeWindow* parent)
-    : NativeWindow(options, parent), root_view_(new RootViewMac(this)) {
-  ui::NativeTheme::GetInstanceForNativeUi()->AddObserver(this);
-  display::Screen::GetScreen()->AddObserver(this);
+NativeWindowMac::~NativeWindowMac() = default;
 
-  int width = 800, height = 600;
-  options.Get(options::kWidth, &width);
-  options.Get(options::kHeight, &height);
+NativeWindowMac::NativeWindowMac(const int32_t base_window_id,
+                                 const gin_helper::Dictionary& options,
+                                 NativeWindow* parent)
+    : NativeWindow{base_window_id, options, parent},
+      root_view_(new RootViewMac(this)) {
+  ui::NativeTheme::GetInstanceForNativeUi()->AddObserver(this);
+  display::Screen::Get()->AddObserver(this);
+
+  int width = options.ValueOrDefault(options::kWidth, 800);
+  int height = options.ValueOrDefault(options::kHeight, 600);
 
   NSRect main_screen_rect = [[[NSScreen screens] firstObject] frame];
   gfx::Rect bounds(round((NSWidth(main_screen_rect) - width) / 2),
                    round((NSHeight(main_screen_rect) - height) / 2), width,
                    height);
 
-  bool resizable = true;
-  options.Get(options::kResizable, &resizable);
+  const bool resizable = options.ValueOrDefault(options::kResizable, true);
   options.Get(options::kZoomToPageWidth, &zoom_to_page_width_);
   options.Get(options::kSimpleFullscreen, &always_simple_fullscreen_);
   options.GetOptional(options::kTrafficLightPosition, &traffic_light_position_);
   options.Get(options::kVisualEffectState, &visual_effect_state_);
 
-  bool minimizable = true;
-  options.Get(options::kMinimizable, &minimizable);
+  const bool minimizable = options.ValueOrDefault(options::kMinimizable, true);
 
-  bool maximizable = true;
-  options.Get(options::kMaximizable, &maximizable);
+  const bool maximizable = options.ValueOrDefault(options::kMaximizable, true);
 
-  bool closable = true;
-  options.Get(options::kClosable, &closable);
+  const bool closable = options.ValueOrDefault(options::kClosable, true);
 
-  std::string tabbingIdentifier;
-  options.Get(options::kTabbingIdentifier, &tabbingIdentifier);
+  const std::string tabbingIdentifier =
+      options.ValueOrDefault(options::kTabbingIdentifier, std::string{});
 
-  std::string windowType;
-  options.Get(options::kType, &windowType);
+  const std::string windowType =
+      options.ValueOrDefault(options::kType, std::string{});
 
-  bool hiddenInMissionControl = false;
-  options.Get(options::kHiddenInMissionControl, &hiddenInMissionControl);
+  const bool hiddenInMissionControl =
+      options.ValueOrDefault(options::kHiddenInMissionControl, false);
 
-  // The window without titlebar is treated the same with frameless window.
-  if (title_bar_style_ != TitleBarStyle::kNormal)
-    set_has_frame(false);
+  const bool paint_when_initially_hidden =
+      options.ValueOrDefault(options::kPaintWhenInitiallyHidden, true);
 
   NSUInteger styleMask = NSWindowStyleMaskTitled;
-
-  // The NSWindowStyleMaskFullSizeContentView style removes rounded corners
-  // for frameless window.
-  bool rounded_corner = true;
-  options.Get(options::kRoundedCorners, &rounded_corner);
-  if (!rounded_corner && !has_frame())
-    styleMask = NSWindowStyleMaskBorderless;
 
   if (minimizable)
     styleMask |= NSWindowStyleMaskMiniaturizable;
@@ -179,9 +216,8 @@ NativeWindowMac::NativeWindowMac(const gin_helper::Dictionary& options,
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
   if (windowType == "textured" && (transparent() || !has_frame())) {
-    util::EmitWarning(
-        "The 'textured' window type is deprecated and will be removed",
-        "DeprecationWarning");
+    util::EmitDeprecationWarning(
+        "The 'textured' window type is deprecated and will be removed");
     styleMask |= NSWindowStyleMaskTexturedBackground;
   }
 #pragma clang diagnostic pop
@@ -194,22 +230,28 @@ NativeWindowMac::NativeWindowMac(const gin_helper::Dictionary& options,
   params.bounds = bounds;
   params.delegate = this;
   params.type = views::Widget::InitParams::TYPE_WINDOW;
+  // Possibly allow painting before shown - later disabled in ElectronNSWindow.
+  params.headless_mode = paint_when_initially_hidden;
+  if (IsTranslucent()) {
+    params.opacity = views::Widget::InitParams::WindowOpacity::kTranslucent;
+  }
   params.native_widget =
       new ElectronNativeWidgetMac(this, windowType, styleMask, widget());
   widget()->Init(std::move(params));
-  widget()->SetNativeWindowProperty(kElectronNativeWindowKey.c_str(), this);
+  widget()->SetNativeWindowProperty(kNativeWindowKey.c_str(), this);
   SetCanResize(resizable);
   window_ = static_cast<ElectronNSWindow*>(
       widget()->GetNativeWindow().GetNativeNSWindow());
 
-  RegisterDeleteDelegateCallback(base::BindOnce(
-      [](NativeWindowMac* window) {
-        if (window->window_)
-          window->window_ = nil;
-        if (window->buttons_proxy_)
-          window->buttons_proxy_ = nil;
-      },
-      this));
+  RegisterDeleteDelegateCallback(RegisterDeleteCallbackPassKey(),
+                                 base::BindOnce(
+                                     [](NativeWindowMac* window) {
+                                       if (window->window_)
+                                         window->window_ = nil;
+                                       if (window->buttons_proxy_)
+                                         window->buttons_proxy_ = nil;
+                                     },
+                                     this));
 
   [window_ setEnableLargerThanScreen:enable_larger_than_screen()];
 
@@ -220,6 +262,11 @@ NativeWindowMac::NativeWindowMac(const gin_helper::Dictionary& options,
   if (parent && !is_modal()) {
     SetParentWindow(parent);
   }
+
+  const bool rounded_corner =
+      options.ValueOrDefault(options::kRoundedCorners, true);
+  if (!rounded_corner && !has_frame())
+    SetBorderless(!rounded_corner);
 
   if (transparent()) {
     // Setting the background color to clear will also hide the shadow.
@@ -238,8 +285,7 @@ NativeWindowMac::NativeWindowMac(const gin_helper::Dictionary& options,
     [window_ setLevel:NSFloatingWindowLevel];
   }
 
-  bool focusable;
-  if (options.Get(options::kFocusable, &focusable) && !focusable)
+  if (bool val; options.Get(options::kFocusable, &val) && !val)
     [window_ setDisableKeyOrMainWindow:YES];
 
   if (transparent() || !has_frame()) {
@@ -250,20 +296,20 @@ NativeWindowMac::NativeWindowMac(const gin_helper::Dictionary& options,
     // https://github.com/electron/electron/issues/517.
     [window_ setOpaque:NO];
     // Show window buttons if titleBarStyle is not "normal".
-    if (title_bar_style_ == TitleBarStyle::kNormal) {
+    if (title_bar_style() == TitleBarStyle::kNormal) {
       InternalSetWindowButtonVisibility(false);
     } else {
       buttons_proxy_ = [[WindowButtonsProxy alloc] initWithWindow:window_];
       [buttons_proxy_ setHeight:titlebar_overlay_height()];
       if (traffic_light_position_) {
         [buttons_proxy_ setMargin:*traffic_light_position_];
-      } else if (title_bar_style_ == TitleBarStyle::kHiddenInset) {
+      } else if (title_bar_style() == TitleBarStyle::kHiddenInset) {
         // For macOS >= 11, while this value does not match official macOS apps
         // like Safari or Notes, it matches titleBarStyle's old implementation
         // before Electron <= 12.
         [buttons_proxy_ setMargin:gfx::Point(12, 11)];
       }
-      if (title_bar_style_ == TitleBarStyle::kCustomButtonsOnHover) {
+      if (title_bar_style() == TitleBarStyle::kCustomButtonsOnHover) {
         [buttons_proxy_ setShowOnHover:YES];
       } else {
         // customButtonsOnHover does not show buttons initially.
@@ -281,19 +327,32 @@ NativeWindowMac::NativeWindowMac(const gin_helper::Dictionary& options,
   }
 
   // Resize to content bounds.
-  bool use_content_size = false;
-  options.Get(options::kUseContentSize, &use_content_size);
+  // NOTE(@mlaurencin) Spec requirements can be found here:
+  // https://developer.mozilla.org/en-US/docs/Web/API/Window/open#width
+  constexpr int kMinSizeReqdBySpec = 100;
+  const int inner_width = options.ValueOrDefault(options::kinnerWidth, 0);
+  const int inner_height = options.ValueOrDefault(options::kinnerHeight, 0);
+  bool use_content_size =
+      options.ValueOrDefault(options::kUseContentSize, false);
+  if (inner_width || inner_height) {
+    use_content_size = true;
+    if (inner_width)
+      width = std::max(kMinSizeReqdBySpec, inner_width);
+    if (inner_height)
+      height = std::max(kMinSizeReqdBySpec, inner_height);
+  }
+
   if (!has_frame() || use_content_size)
     SetContentSize(gfx::Size(width, height));
 
   // Enable the NSView to accept first mouse event.
-  bool acceptsFirstMouse = false;
-  options.Get(options::kAcceptFirstMouse, &acceptsFirstMouse);
+  const bool acceptsFirstMouse =
+      options.ValueOrDefault(options::kAcceptFirstMouse, false);
   [window_ setAcceptsFirstMouse:acceptsFirstMouse];
 
   // Disable auto-hiding cursor.
-  bool disableAutoHideCursor = false;
-  options.Get(options::kDisableAutoHideCursor, &disableAutoHideCursor);
+  const bool disableAutoHideCursor =
+      options.ValueOrDefault(options::kDisableAutoHideCursor, false);
   [window_ setDisableAutoHideCursor:disableAutoHideCursor];
 
   SetHiddenInMissionControl(hiddenInMissionControl);
@@ -302,7 +361,7 @@ NativeWindowMac::NativeWindowMac(const gin_helper::Dictionary& options,
   // by calls to other APIs.
   SetMaximizable(maximizable);
 
-  // Default content view.
+  // Default content view (replaced by BaseWindow::SetContentView).
   SetContentView(new views::View());
   AddContentViewLayers();
 
@@ -310,17 +369,21 @@ NativeWindowMac::NativeWindowMac(const gin_helper::Dictionary& options,
   original_level_ = [window_ level];
 }
 
-NativeWindowMac::~NativeWindowMac() = default;
-
 void NativeWindowMac::SetContentView(views::View* view) {
   views::View* root_view = GetContentsView();
   if (content_view())
     root_view->RemoveChildView(content_view());
 
   set_content_view(view);
-  root_view->AddChildView(content_view());
 
-  root_view->DeprecatedLayoutImmediately();
+  // Make content_view_ hit-test-transparent where it has no covering child
+  // so events fall through to the sibling WebContentsView in BrowserWindow.
+  view->SetEventTargeter(std::make_unique<views::ViewTargeter>(
+      std::make_unique<ContentViewTargeterDelegate>()));
+
+  root_view->AddChildViewRaw(content_view());
+
+  FlushPendingRootLayout(root_view);
 }
 
 void NativeWindowMac::Close() {
@@ -329,7 +392,7 @@ void NativeWindowMac::Close() {
     return;
   }
 
-  if (fullscreen_transition_state() != FullScreenTransitionState::kNone) {
+  if (is_transitioning_fullscreen()) {
     SetHasDeferredWindowClose(true);
     return;
   }
@@ -407,6 +470,8 @@ void NativeWindowMac::Show() {
     return;
   }
 
+  FlushPendingDisplayMode();
+
   set_wants_to_be_visible(true);
 
   // Reattach the window to the parent to actually show it.
@@ -421,13 +486,21 @@ void NativeWindowMac::Show() {
 }
 
 void NativeWindowMac::ShowInactive() {
+  FlushPendingDisplayMode();
+
   set_wants_to_be_visible(true);
 
   // Reattach the window to the parent to actually show it.
   if (parent())
     InternalSetParentWindow(parent(), true);
 
+  // Triggers `NativeWidgetMacNSWindowHost::OnVisibilityChanged`.
+  widget()->ShowInactive();
+  // `Widget::ShowInactive` is not sufficient to bring window to front.
   [window_ orderFrontRegardless];
+  // Above calls do not trigger `orderWindow: relativeTo:` in which headless
+  // mode is being disabled.
+  [window_ disableHeadlessMode];
 }
 
 void NativeWindowMac::Hide() {
@@ -615,7 +688,7 @@ void NativeWindowMac::SetFullScreen(bool fullscreen) {
   // that it's possible to call it while a fullscreen transition is currently
   // in process. This can create weird behavior (incl. phantom windows),
   // so we want to schedule a transition for when the current one has completed.
-  if (fullscreen_transition_state() != FullScreenTransitionState::kNone) {
+  if (is_transitioning_fullscreen()) {
     if (!pending_transitions_.empty()) {
       bool last_pending = pending_transitions_.back();
       // Only push new transitions if they're different than the last transition
@@ -639,12 +712,10 @@ void NativeWindowMac::SetFullScreen(bool fullscreen) {
   // SetFullScreen is called by a user before windowWillEnterFullScreen
   // or windowWillExitFullScreen are invoked, and so a potential transition
   // could be dropped.
-  fullscreen_transition_state_ = fullscreen
-                                     ? FullScreenTransitionState::kEntering
-                                     : FullScreenTransitionState::kExiting;
+  set_is_transitioning_fullscreen(true);
 
   if (![window_ toggleFullScreenMode:nil])
-    fullscreen_transition_state_ = FullScreenTransitionState::kNone;
+    set_is_transitioning_fullscreen(false);
 }
 
 bool NativeWindowMac::IsFullscreen() const {
@@ -753,6 +824,11 @@ void NativeWindowMac::MoveTop() {
   [window_ orderWindowByShuffling:NSWindowAbove relativeTo:0];
 }
 
+void NativeWindowMac::SetBorderless(bool borderless) {
+  SetStyleMask(!borderless, NSWindowStyleMaskTitled);
+  SetStyleMask(borderless, NSWindowStyleMaskBorderless);
+}
+
 void NativeWindowMac::SetResizable(bool resizable) {
   ScopedDisableResize disable_resize;
   SetStyleMask(resizable, NSWindowStyleMaskResizable);
@@ -772,8 +848,7 @@ void NativeWindowMac::SetResizable(bool resizable) {
 }
 
 bool NativeWindowMac::IsResizable() const {
-  bool in_fs_transition =
-      fullscreen_transition_state() != FullScreenTransitionState::kNone;
+  const bool in_fs_transition = is_transitioning_fullscreen();
   bool has_rs_mask = HasStyleMask(NSWindowStyleMaskResizable);
   return has_rs_mask && !IsFullscreen() && !in_fs_transition;
 }
@@ -905,10 +980,9 @@ void NativeWindowMac::SetWindowLevel(int unbounded_level) {
   // a bug of Cocoa or macOS.
   SetMaximizable(was_maximizable_);
 
-  // This must be notified at the very end or IsAlwaysOnTop
-  // will not yet have been updated to reflect the new status
   if (did_z_order_level_change)
-    NativeWindow::NotifyWindowAlwaysOnTopChanged();
+    NativeWindow::NotifyWindowAlwaysOnTopChanged(z_order_level !=
+                                                 ui::ZOrderLevel::kNormal);
 }
 
 ui::ZOrderLevel NativeWindowMac::GetZOrderLevel() const {
@@ -923,14 +997,11 @@ void NativeWindowMac::Invalidate() {
   [[window_ contentView] setNeedsDisplay:YES];
 }
 
-void NativeWindowMac::SetTitle(const std::string& title) {
-  [window_ setTitle:base::SysUTF8ToNSString(title)];
+void NativeWindowMac::OnTitleChanged() {
+  [window_ setTitle:base::SysUTF8ToNSString(GetTitle())];
+
   if (buttons_proxy_)
     [buttons_proxy_ redraw];
-}
-
-std::string NativeWindowMac::GetTitle() const {
-  return base::SysNSStringToUTF8([window_ title]);
 }
 
 void NativeWindowMac::FlashFrame(bool flash) {
@@ -1041,7 +1112,7 @@ void NativeWindowMac::SetSimpleFullScreen(bool simple_fullscreen) {
       if (has_frame())
         visibility = true;
       else
-        visibility = title_bar_style_ != TitleBarStyle::kNormal;
+        visibility = title_bar_style() != TitleBarStyle::kNormal;
       InternalSetWindowButtonVisibility(visibility);
     }
 
@@ -1162,6 +1233,10 @@ void NativeWindowMac::SetContentProtection(bool enable) {
       setSharingType:enable ? NSWindowSharingNone : NSWindowSharingReadOnly];
 }
 
+bool NativeWindowMac::IsContentProtected() const {
+  return [window_ sharingType] == NSWindowSharingNone;
+}
+
 void NativeWindowMac::SetFocusable(bool focusable) {
   // No known way to unfocus the window if it had the focus. Here we do not
   // want to call Focus(false) because it moves the window to the back, i.e.
@@ -1178,11 +1253,11 @@ void NativeWindowMac::SetParentWindow(NativeWindow* parent) {
 }
 
 gfx::NativeView NativeWindowMac::GetNativeView() const {
-  return [window_ contentView];
+  return gfx::NativeView([window_ contentView]);
 }
 
 gfx::NativeWindow NativeWindowMac::GetNativeWindow() const {
-  return window_;
+  return gfx::NativeWindow(window_);
 }
 
 gfx::AcceleratedWidget NativeWindowMac::GetAcceleratedWidget() const {
@@ -1205,7 +1280,7 @@ content::DesktopMediaID NativeWindowMac::GetDesktopMediaID() const {
 }
 
 NativeWindowHandle NativeWindowMac::GetNativeWindowHandle() const {
-  return [window_ contentView];
+  return GetNativeView();
 }
 
 void NativeWindowMac::SetProgressBar(double progress,
@@ -1290,46 +1365,31 @@ void NativeWindowMac::UpdateVibrancyRadii(bool fullscreen) {
 
   if (vibrantView != nil && !vibrancy_type_.empty()) {
     const bool no_rounded_corner = !HasStyleMask(NSWindowStyleMaskTitled);
-    const int macos_version = base::mac::MacOSMajorVersion();
-    const bool modal = is_modal();
 
-    // If the window is modal, its corners are rounded on macOS >= 11 or higher
-    // unless the user has explicitly passed noRoundedCorners.
-    bool should_round_modal =
-        !no_rounded_corner && macos_version >= 11 && modal;
+    // If the window is modal, its corners are rounded unless
+    // the user has explicitly passed |roundedCorners: false|.
+    bool should_round_modal = !no_rounded_corner && is_modal();
     // If the window is nonmodal, its corners are rounded if it is frameless and
-    // the user hasn't passed noRoundedCorners.
-    bool should_round_nonmodal = !no_rounded_corner && !modal && !has_frame();
+    // the user hasn't passed |roundedCorners: false|.
+    bool should_round_nonmodal =
+        !no_rounded_corner && !is_modal() && !has_frame();
 
     if (should_round_nonmodal || should_round_modal) {
-      CGFloat radius;
-      if (fullscreen) {
-        radius = 0.0f;
-      } else if (macos_version >= 11) {
-        radius = 9.0f;
-      } else {
-        // Smaller corner radius on versions prior to Big Sur.
-        radius = 5.0f;
-      }
-
+      CGFloat radius = fullscreen ? 0.0f : 9.0f;
       CGFloat dimension = 2 * radius + 1;
-      NSSize size = NSMakeSize(dimension, dimension);
-      NSImage* maskImage = [NSImage imageWithSize:size
-                                          flipped:NO
-                                   drawingHandler:^BOOL(NSRect rect) {
-                                     NSBezierPath* bezierPath = [NSBezierPath
-                                         bezierPathWithRoundedRect:rect
-                                                           xRadius:radius
-                                                           yRadius:radius];
-                                     [[NSColor blackColor] set];
-                                     [bezierPath fill];
-                                     return YES;
-                                   }];
+      NSImage* maskImage =
+          [NSImage imageWithSize:NSMakeSize(dimension, dimension)
+                         flipped:NO
+                  drawingHandler:^BOOL(NSRect rect) {
+                    [[NSBezierPath bezierPathWithRoundedRect:rect
+                                                     xRadius:radius
+                                                     yRadius:radius] fill];
+                    return YES;
+                  }];
 
-      [maskImage setCapInsets:NSEdgeInsetsMake(radius, radius, radius, radius)];
-      [maskImage setResizingMode:NSImageResizingModeStretch];
+      maskImage.capInsets = NSEdgeInsetsMake(radius, radius, radius, radius);
+      maskImage.resizingMode = NSImageResizingModeStretch;
       [vibrantView setMaskImage:maskImage];
-      [window_ setCornerMask:maskImage];
     }
   }
 }
@@ -1436,7 +1496,7 @@ void NativeWindowMac::SetVibrancy(const std::string& type, int duration) {
       // other views.
       vibrant_native_view_host_ = rootView->AddChildViewAt(
           std::make_unique<views::NativeViewHost>(), 0);
-      vibrant_native_view_host_->Attach(vibrantView);
+      vibrant_native_view_host_->Attach(gfx::NativeView(vibrantView));
 
       rootView->DeprecatedLayoutImmediately();
 
@@ -1465,7 +1525,7 @@ void NativeWindowMac::SetWindowButtonVisibility(bool visible) {
     [buttons_proxy_ setVisible:visible];
   }
 
-  if (title_bar_style_ != TitleBarStyle::kCustomButtonsOnHover)
+  if (title_bar_style() != TitleBarStyle::kCustomButtonsOnHover)
     InternalSetWindowButtonVisibility(visible);
 
   NotifyLayoutWindowControlsOverlay();
@@ -1493,6 +1553,18 @@ std::optional<gfx::Point> NativeWindowMac::GetWindowButtonPosition() const {
 void NativeWindowMac::RedrawTrafficLights() {
   if (buttons_proxy_ && !IsFullscreen())
     [buttons_proxy_ redraw];
+}
+
+void NativeWindowMac::HideTrafficLights() {
+  if (buttons_proxy_)
+    [buttons_proxy_ setVisible:NO];
+}
+
+void NativeWindowMac::RestoreTrafficLights() {
+  if (buttons_proxy_ && window_button_visibility_.value_or(true)) {
+    [buttons_proxy_ redraw];
+    [buttons_proxy_ setVisible:YES];
+  }
 }
 
 // In simpleFullScreen mode, update the frame for new bounds.
@@ -1588,8 +1660,11 @@ void NativeWindowMac::PreviewFile(const std::string& path,
 }
 
 void NativeWindowMac::CloseFilePreview() {
-  if ([QLPreviewPanel sharedPreviewPanelExists]) {
+  // Need to be careful about checking [QLPreviewPanel sharedPreviewPanel] as
+  // simply accessing it will cause it to reinitialize and reappear.
+  if ([QLPreviewPanel sharedPreviewPanelExists] && preview_item_) {
     [[QLPreviewPanel sharedPreviewPanel] close];
+    preview_item_ = nil;
   }
 }
 
@@ -1673,45 +1748,30 @@ bool NativeWindowMac::IsActive() const {
 void NativeWindowMac::Cleanup() {
   DCHECK(!IsClosed());
   ui::NativeTheme::GetInstanceForNativeUi()->RemoveObserver(this);
-  display::Screen::GetScreen()->RemoveObserver(this);
+  display::Screen::Get()->RemoveObserver(this);
+  [window_ cleanup];
 }
 
-class NativeAppWindowFrameViewMac : public views::NativeFrameViewMac {
- public:
-  NativeAppWindowFrameViewMac(views::Widget* frame, NativeWindowMac* window)
-      : views::NativeFrameViewMac(frame), native_window_(window) {}
+std::unique_ptr<views::FrameView> NativeWindowMac::CreateFrameView(
+    views::Widget* widget) {
+  auto frame_view = std::make_unique<views::NativeFrameViewMac>(widget);
+  frame_view->set_non_client_hit_test_callback(base::BindRepeating(
+      &NativeWindowMac::FrameViewNonClientHitTest, base::Unretained(this)));
+  return frame_view;
+}
 
-  NativeAppWindowFrameViewMac(const NativeAppWindowFrameViewMac&) = delete;
-  NativeAppWindowFrameViewMac& operator=(const NativeAppWindowFrameViewMac&) =
-      delete;
-
-  ~NativeAppWindowFrameViewMac() override = default;
-
-  // NonClientFrameView:
-  int NonClientHitTest(const gfx::Point& point) override {
-    if (!bounds().Contains(point))
-      return HTNOWHERE;
-
-    if (GetWidget()->IsFullscreen())
-      return HTCLIENT;
-
-    // Check for possible draggable region in the client area for the frameless
-    // window.
-    int contents_hit_test = native_window_->NonClientHitTest(point);
-    if (contents_hit_test != HTNOWHERE)
-      return contents_hit_test;
-
+int NativeWindowMac::FrameViewNonClientHitTest(const gfx::Point& point) {
+  if (widget()->IsFullscreen()) {
     return HTCLIENT;
   }
 
- private:
-  // Weak.
-  raw_ptr<NativeWindowMac> const native_window_;
-};
+  // Check for possible draggable region in the client area for the frameless
+  // window.
+  int contents_hit_test = NonClientHitTest(point);
+  if (contents_hit_test != HTNOWHERE)
+    return contents_hit_test;
 
-std::unique_ptr<views::NonClientFrameView>
-NativeWindowMac::CreateNonClientFrameView(views::Widget* widget) {
-  return std::make_unique<NativeAppWindowFrameViewMac>(widget, this);
+  return HTCLIENT;
 }
 
 bool NativeWindowMac::HasStyleMask(NSUInteger flag) const {
@@ -1839,11 +1899,34 @@ std::optional<gfx::Rect> NativeWindowMac::GetWindowControlsOverlayRect() {
   return std::nullopt;
 }
 
+void NativeWindowMac::OnWidgetInitialized() {
+  // |window_| is not yet assigned when this function is called, so we need to
+  // get the window from the widget.
+  NSWindow* window = widget()->GetNativeWindow().GetNativeNSWindow();
+
+  // In |NativeWidgetNSWindowBridge::InitCompositorView| in Chromium,
+  // translucent windows are assigned a clear background color. This causes
+  // undesirable side effects, such as a window with vibrancy losing its natural
+  // system border highlight. We undo that behavior here.
+  //
+  // Ref:
+  // https://source.chromium.org/chromium/chromium/src/+/main:components/remote_cocoa/app_shim/native_widget_ns_window_bridge.mm;l=1341-1342;drc=e7c8be576285195257b0813326b3bab154dc7e73
+  if (!transparent()) {
+    if ([[window backgroundColor] isEqual:NSColor.clearColor]) {
+      [window setBackgroundColor:NSColor.windowBackgroundColor];
+    }
+    if (![window isOpaque]) {
+      [window setOpaque:YES];
+    }
+  }
+}
+
 // static
 std::unique_ptr<NativeWindow> NativeWindow::Create(
+    const int32_t base_window_id,
     const gin_helper::Dictionary& options,
     NativeWindow* parent) {
-  return std::make_unique<NativeWindowMac>(options, parent);
+  return std::make_unique<NativeWindowMac>(base_window_id, options, parent);
 }
 
 }  // namespace electron

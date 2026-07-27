@@ -148,6 +148,12 @@ void OpenExternal(const GURL& url,
     return;
   }
 
+  // Check this to prevent system dialog from popping up on macOS Tahoe.
+  if (![[NSWorkspace sharedWorkspace] URLForApplicationToOpenURL:ns_url]) {
+    std::move(callback).Run("No application found to open URL");
+    return;
+  }
+
   NSWorkspaceOpenConfiguration* configuration =
       [NSWorkspaceOpenConfiguration configuration];
   configuration.activates = options.activate;
@@ -161,13 +167,9 @@ void OpenExternal(const GURL& url,
           configuration:configuration
       completionHandler:^(NSRunningApplication* _Nullable app,
                           NSError* _Nullable error) {
-        if (error) {
-          runner->PostTask(FROM_HERE, base::BindOnce(std::move(copied_callback),
-                                                     "Failed to open URL"));
-        } else {
-          runner->PostTask(FROM_HERE,
-                           base::BindOnce(std::move(copied_callback), ""));
-        }
+        std::string err_msg = error ? "Failed to open URL" : "";
+        runner->PostTask(FROM_HERE, base::BindOnce(std::move(copied_callback),
+                                                   std::move(err_msg)));
       }];
 }
 
@@ -220,7 +222,6 @@ void Beep() {
 
 std::string GetLoginItemEnabled(const std::string& type,
                                 const std::string& service_name) {
-  bool enabled = GetLoginItemEnabledDeprecated();
   if (@available(macOS 13, *)) {
     SMAppService* service = GetServiceForType(type, service_name);
     SMAppServiceStatus status = [service status];
@@ -232,10 +233,11 @@ std::string GetLoginItemEnabled(const std::string& type,
       return "requires-approval";
     else if (status == SMAppServiceStatusNotFound) {
       // If the login item was enabled with the old API, return that.
-      return enabled ? "enabled-deprecated" : "not-found";
+      return GetLoginItemEnabledDeprecated() ? "enabled-deprecated"
+                                             : "not-found";
     }
   }
-  return enabled ? "enabled" : "not-registered";
+  return GetLoginItemEnabledDeprecated() ? "enabled" : "not-registered";
 }
 
 bool SetLoginItemEnabled(const std::string& type,
@@ -247,7 +249,13 @@ bool SetLoginItemEnabled(const std::string& type,
     // as a LoginItem via the old API before re-enabling with the new API.
     if (GetLoginItemEnabledDeprecated() && enabled) {
       NSString* identifier = GetLoginHelperBundleIdentifier();
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+      // SMLoginItemSetEnabled is deprecated as of macOS 13, but it is used
+      // here intentionally to unregister login items registered by the old
+      // API before re-registering them with SMAppService.
       SMLoginItemSetEnabled((__bridge CFStringRef)identifier, false);
+#pragma clang diagnostic pop
     }
 #endif
     SMAppService* service = GetServiceForType(type, service_name);
@@ -260,7 +268,13 @@ bool SetLoginItemEnabled(const std::string& type,
     return result;
   } else {
     NSString* identifier = GetLoginHelperBundleIdentifier();
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    // SMLoginItemSetEnabled is deprecated as of macOS 13; this branch is
+    // unreachable now that macOS 13 is the minimum supported version, but
+    // the @available check above still compiles it.
     return SMLoginItemSetEnabled((__bridge CFStringRef)identifier, enabled);
+#pragma clang diagnostic pop
   }
 }
 

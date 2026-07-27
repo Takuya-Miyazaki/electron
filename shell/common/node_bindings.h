@@ -125,22 +125,26 @@ class NodeBindings {
   virtual ~NodeBindings();
 
   // Setup V8, libuv.
-  void Initialize(v8::Local<v8::Context> context);
+  void Initialize(v8::Isolate* isolate, v8::Local<v8::Context> context);
 
   std::vector<std::string> ParseNodeCliFlags();
 
   // Create the environment and load node.js.
   std::shared_ptr<node::Environment> CreateEnvironment(
+      v8::Isolate* isolate,
       v8::Local<v8::Context> context,
       node::MultiIsolatePlatform* platform,
+      size_t max_young_generation_size,
       std::vector<std::string> args,
       std::vector<std::string> exec_args,
       std::optional<base::RepeatingCallback<void()>> on_app_code_ready =
           std::nullopt);
 
   std::shared_ptr<node::Environment> CreateEnvironment(
+      v8::Isolate* isolate,
       v8::Local<v8::Context> context,
       node::MultiIsolatePlatform* platform,
+      size_t max_young_generation_size = 0,
       std::optional<base::RepeatingCallback<void()>> on_app_code_ready =
           std::nullopt);
 
@@ -152,6 +156,12 @@ class NodeBindings {
 
   // Notify embed thread to start polling after environment is loaded.
   void StartPolling();
+
+  // Stop the embed thread and polling without destroying handles or the loop.
+  // After this call, PrepareEmbedThread + StartPolling can restart them.
+  // Used by pooled worklets that need to pause the embed thread during
+  // environment teardown but reuse the same NodeBindings for the next context.
+  void StopPolling();
 
   node::IsolateData* isolate_data(v8::Local<v8::Context> context) const;
 
@@ -220,6 +230,11 @@ class NodeBindings {
 
   // Indicates whether polling thread has been created.
   bool initialized_ = false;
+
+  // Whether PrepareEmbedThread has initialized the semaphore and async handle.
+  // Unlike |initialized_|, this is never reset — the handles live until the
+  // destructor.
+  bool embed_thread_prepared_ = false;
 
   // Indicates whether the app code has finished loading
   // for ESM this is async after the module is loaded

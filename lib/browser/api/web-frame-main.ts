@@ -1,10 +1,10 @@
 import { IpcMainImpl } from '@electron/internal/browser/ipc-main-impl';
 import { MessagePortMain } from '@electron/internal/browser/message-port-main';
 
-const { WebFrameMain, fromId } = process._linkedBinding('electron_browser_web_frame_main');
+const { WebFrameMain, fromId, fromFrameToken } = process._linkedBinding('electron_browser_web_frame_main');
 
 Object.defineProperty(WebFrameMain.prototype, 'ipc', {
-  get () {
+  get() {
     const ipc = new IpcMainImpl();
     Object.defineProperty(this, 'ipc', { value: ipc });
     return ipc;
@@ -37,11 +37,12 @@ WebFrameMain.prototype._sendInternal = function (channel, ...args) {
 
 WebFrameMain.prototype.postMessage = function (...args) {
   if (Array.isArray(args[2])) {
-    args[2] = args[2].map(o => o instanceof MessagePortMain ? o._internalPort : o);
+    args[2] = args[2].map((o) => (o instanceof MessagePortMain ? o._internalPort : o));
   }
   this._postMessage(...args);
 };
 
 export default {
-  fromId
+  fromId,
+  fromFrameToken
 };

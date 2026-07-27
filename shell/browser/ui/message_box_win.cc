@@ -10,8 +10,8 @@
 
 #include <vector>
 
-#include "base/containers/contains.h"
 #include "base/containers/flat_map.h"
+#include "base/logging.h"
 #include "base/no_destructor.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
@@ -20,8 +20,8 @@
 #include "shell/browser/browser.h"
 #include "shell/browser/native_window_views.h"
 #include "shell/browser/ui/win/dialog_thread.h"
-#include "ui/gfx/icon_util.h"
 #include "ui/gfx/image/image_skia.h"
+#include "ui/gfx/win/icon_util.h"
 
 namespace electron {
 
@@ -159,12 +159,24 @@ DialogResult ShowTaskDialogWstr(gfx::AcceleratedWidget parent,
   config.hInstance = GetModuleHandle(nullptr);
   config.dwFlags = flags;
 
-  if (parent) {
+  if (parent && ::IsWindowEnabled(parent)) {
     config.hwndParent = parent;
+    config.dwFlags |= TDF_POSITION_RELATIVE_TO_WINDOW;
   }
 
-  if (default_id > 0)
-    config.nDefaultButton = kIDStart + default_id;
+  if (default_id >= 0 &&
+      base::checked_cast<size_t>(default_id) < buttons.size()) {
+    if (!no_link) {
+      auto common = GetCommonID(buttons[default_id]);
+      if (common.button != -1) {
+        config.nDefaultButton = common.id;
+      } else {
+        config.nDefaultButton = kIDStart + default_id;
+      }
+    } else {
+      config.nDefaultButton = kIDStart + default_id;
+    }
+  }
 
   // TaskDialogIndirect doesn't allow empty name, if we set empty title it
   // will show "electron.exe" in title.
@@ -176,7 +188,7 @@ DialogResult ShowTaskDialogWstr(gfx::AcceleratedWidget parent,
     config.pszWindowTitle = base::as_wcstr(title);
   }
 
-  base::win::ScopedHICON hicon;
+  base::win::ScopedGDIObject<HICON> hicon;
   if (!icon.isNull()) {
     hicon = IconUtil::CreateHICONFromSkBitmap(*icon.bitmap());
     config.dwFlags |= TDF_USE_HICON_MAIN;
@@ -242,7 +254,7 @@ DialogResult ShowTaskDialogWstr(gfx::AcceleratedWidget parent,
   TaskDialogIndirect(&config, &id, nullptr, &verification_flag_checked);
 
   int button_id;
-  if (base::Contains(id_map, id))  // common button.
+  if (id_map.contains(id))  // common button.
     button_id = id_map[id];
   else if (id >= kIDStart)  // custom button.
     button_id = id - kIDStart;
@@ -289,7 +301,7 @@ void ShowMessageBox(const MessageBoxSettings& settings,
   // kHwndReserve in the dialogs map for now.
   HWND* hwnd = nullptr;
   if (settings.id) {
-    if (base::Contains(GetDialogsMap(), *settings.id))
+    if (GetDialogsMap().contains(*settings.id))
       CloseMessageBox(*settings.id);
     auto it = GetDialogsMap().emplace(*settings.id,
                                       std::make_unique<HWND>(kHwndReserve));

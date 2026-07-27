@@ -9,26 +9,34 @@
 
 #include <map>
 
+#include "gin/weak_cell.h"
 #import "shell/browser/ui/cocoa/electron_menu_controller.h"
 
 namespace electron {
 class NativeWindow;
+class WebFrameMain;
 
 namespace api {
 
 class MenuMac : public Menu {
- protected:
+ public:
+  // Make public for cppgc::MakeGarbageCollected.
   explicit MenuMac(gin::Arguments* args);
   ~MenuMac() override;
 
+  void Trace(cppgc::Visitor*) const override;
+
+ protected:
   // Menu
   void PopupAt(BaseWindow* window,
+               std::optional<WebFrameMain*> frame,
                int x,
                int y,
                int positioning_item,
                ui::mojom::MenuSourceType source_type,
                base::OnceClosure callback) override;
   void PopupOnUI(const base::WeakPtr<NativeWindow>& native_window,
+                 const base::WeakPtr<WebFrameMain>& frame,
                  int32_t window_id,
                  int x,
                  int y,
@@ -48,7 +56,7 @@ class MenuMac : public Menu {
   // window ID -> open context menu
   std::map<int32_t, ElectronMenuController*> popup_controllers_;
 
-  base::WeakPtrFactory<MenuMac> weak_factory_{this};
+  gin::WeakCellFactory<MenuMac> weak_cell_factory_{this};
 };
 
 }  // namespace api

@@ -6,7 +6,6 @@
 #define ELECTRON_SHELL_COMMON_PROCESS_UTIL_H_
 
 #include <string>
-#include <string_view>
 
 namespace electron {
 
@@ -16,6 +15,11 @@ bool IsBrowserProcess();
 bool IsRendererProcess();
 bool IsUtilityProcess();
 bool IsZygoteProcess();
+
+// True when this process is the ELECTRON_RUN_AS_NODE entry point (e.g. a
+// child_process.fork()ed Node process). Such a process has no --type switch,
+// so IsBrowserProcess() is also true for it; use this to tell the two apart.
+bool IsRunningAsNode();
 
 }  // namespace electron
 

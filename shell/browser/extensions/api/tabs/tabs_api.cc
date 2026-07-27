@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "base/command_line.h"
+#include "base/containers/fixed_flat_set.h"
 #include "base/strings/pattern.h"
 #include "base/types/expected_macros.h"
 #include "chrome/common/url_constants.h"
@@ -26,6 +27,7 @@
 #include "extensions/common/permissions/permissions_data.h"
 #include "extensions/common/switches.h"
 #include "shell/browser/api/electron_api_web_contents.h"
+#include "shell/browser/extensions/electron_extension_tab_util.h"
 #include "shell/browser/native_window.h"
 #include "shell/browser/web_contents_zoom_controller.h"
 #include "shell/browser/window_list.h"
@@ -137,7 +139,7 @@ bool ExecuteCodeInTabFunction::CanExecuteScriptOnPage(std::string* error) {
   // If |tab_id| is specified, look for the tab. Otherwise default to selected
   // tab in the current window.
   CHECK_GE(execute_tab_id_, 0);
-  auto* contents = electron::api::WebContents::FromID(execute_tab_id_);
+  auto* contents = GetElectronTabById(execute_tab_id_, browser_context());
   if (!contents) {
     return false;
   }
@@ -190,7 +192,7 @@ bool ExecuteCodeInTabFunction::CanExecuteScriptOnPage(std::string* error) {
 
 ScriptExecutor* ExecuteCodeInTabFunction::GetScriptExecutor(
     std::string* error) {
-  auto* contents = electron::api::WebContents::FromID(execute_tab_id_);
+  auto* contents = GetElectronTabById(execute_tab_id_, browser_context());
   if (!contents)
     return nullptr;
   return contents->script_executor();
@@ -227,7 +229,7 @@ ExtensionFunction::ResponseAction TabsReloadFunction::Run() {
   }
 
   int tab_id = params->tab_id ? *params->tab_id : -1;
-  auto* contents = electron::api::WebContents::FromID(tab_id);
+  auto* contents = GetElectronTabById(tab_id, browser_context());
   if (!contents)
     return RespondNow(Error("No such tab"));
 
@@ -265,7 +267,7 @@ ExtensionFunction::ResponseAction TabsQueryFunction::Run() {
   std::optional<bool> audible = params->query_info.audible;
   std::optional<bool> muted = params->query_info.muted;
 
-  base::Value::List result;
+  base::ListValue result;
 
   // Filter out webContents that don't belong to the current browser context.
   auto* bc = browser_context();
@@ -320,6 +322,8 @@ ExtensionFunction::ResponseAction TabsQueryFunction::Run() {
     tab.active = contents->IsFocused();
     tab.audible = contents->IsCurrentlyAudible();
     tab.muted_info = CreateMutedInfo(wc);
+    // TODO: Add proper support for split views
+    tab.split_view_id = -1;
 
     result.Append(tab.ToValue());
   }
@@ -332,7 +336,7 @@ ExtensionFunction::ResponseAction TabsGetFunction::Run() {
   EXTENSION_FUNCTION_VALIDATE(params);
   int tab_id = params->tab_id;
 
-  auto* contents = electron::api::WebContents::FromID(tab_id);
+  auto* contents = GetElectronTabById(tab_id, browser_context());
   if (!contents)
     return RespondNow(Error("No such tab"));
 
@@ -352,6 +356,8 @@ ExtensionFunction::ResponseAction TabsGetFunction::Run() {
 
   tab.active = contents->IsFocused();
   tab.last_accessed = wc->GetLastActiveTime().InMillisecondsFSinceUnixEpoch();
+  // TODO: Add proper support for split views
+  tab.split_view_id = -1;
 
   return RespondNow(ArgumentList(tabs::Get::Results::Create(std::move(tab))));
 }
@@ -362,7 +368,7 @@ ExtensionFunction::ResponseAction TabsSetZoomFunction::Run() {
   EXTENSION_FUNCTION_VALIDATE(params);
 
   int tab_id = params->tab_id ? *params->tab_id : -1;
-  auto* contents = electron::api::WebContents::FromID(tab_id);
+  auto* contents = GetElectronTabById(tab_id, browser_context());
   if (!contents)
     return RespondNow(Error("No such tab"));
 
@@ -389,13 +395,11 @@ ExtensionFunction::ResponseAction TabsGetZoomFunction::Run() {
   EXTENSION_FUNCTION_VALIDATE(params);
 
   int tab_id = params->tab_id ? *params->tab_id : -1;
-  auto* contents = electron::api::WebContents::FromID(tab_id);
+  auto* contents = GetElectronTabById(tab_id, browser_context());
   if (!contents)
     return RespondNow(Error("No such tab"));
 
-  double zoom_level = contents->GetZoomController()->GetZoomLevel();
-  double zoom_factor = blink::ZoomLevelToZoomFactor(zoom_level);
-
+  const double zoom_factor = contents->GetZoomFactor();
   return RespondNow(ArgumentList(tabs::GetZoom::Results::Create(zoom_factor)));
 }
 
@@ -405,13 +409,13 @@ ExtensionFunction::ResponseAction TabsGetZoomSettingsFunction::Run() {
   EXTENSION_FUNCTION_VALIDATE(params);
 
   int tab_id = params->tab_id ? *params->tab_id : -1;
-  auto* contents = electron::api::WebContents::FromID(tab_id);
+  auto* contents = GetElectronTabById(tab_id, browser_context());
   if (!contents)
     return RespondNow(Error("No such tab"));
 
-  auto* zoom_controller = contents->GetZoomController();
-  WebContentsZoomController::ZoomMode zoom_mode =
-      contents->GetZoomController()->zoom_mode();
+  const auto* zoom_controller = contents->GetZoomController();
+  const WebContentsZoomController::ZoomMode zoom_mode =
+      zoom_controller->zoom_mode();
   tabs::ZoomSettings zoom_settings;
   ZoomModeToZoomSettings(zoom_mode, &zoom_settings);
   zoom_settings.default_zoom_factor =
@@ -429,7 +433,7 @@ ExtensionFunction::ResponseAction TabsSetZoomSettingsFunction::Run() {
   EXTENSION_FUNCTION_VALIDATE(params);
 
   int tab_id = params->tab_id ? *params->tab_id : -1;
-  auto* contents = electron::api::WebContents::FromID(tab_id);
+  auto* contents = GetElectronTabById(tab_id, browser_context());
   if (!contents)
     return RespondNow(Error("No such tab"));
 
@@ -496,20 +500,23 @@ bool IsKillURL(const GURL& url) {
   }
 
   // Also disallow a few more hosts which are not covered by the check above.
-  static const char* const kKillHosts[] = {
-      chrome::kChromeUIDelayedHangUIHost, chrome::kChromeUIHangUIHost,
-      chrome::kChromeUIQuitHost,          chrome::kChromeUIRestartHost,
-      content::kChromeUIBrowserCrashHost, content::kChromeUIMemoryExhaustHost,
-  };
+  constexpr auto kKillHosts = base::MakeFixedFlatSet<std::string_view>({
+      chrome::kChromeUIDelayedHangUIHost,
+      chrome::kChromeUIHangUIHost,
+      chrome::kChromeUIQuitHost,
+      chrome::kChromeUIRestartHost,
+      content::kChromeUIBrowserCrashHost,
+      content::kChromeUIMemoryExhaustHost,
+  });
 
-  return base::Contains(kKillHosts, url.host_piece());
+  return kKillHosts.contains(url.host());
 }
 
 GURL ResolvePossiblyRelativeURL(const std::string& url_string,
                                 const Extension* extension) {
   GURL url = GURL(url_string);
   if (!url.is_valid() && extension)
-    url = extension->GetResourceURL(url_string);
+    url = extension->ResolveExtensionURL(url_string);
 
   return url;
 }
@@ -602,7 +609,7 @@ ExtensionFunction::ResponseAction TabsUpdateFunction::Run() {
   EXTENSION_FUNCTION_VALIDATE(params);
 
   int tab_id = params->tab_id ? *params->tab_id : -1;
-  auto* contents = electron::api::WebContents::FromID(tab_id);
+  auto* contents = GetElectronTabById(tab_id, browser_context());
   if (!contents)
     return RespondNow(Error("No such tab"));
 
@@ -651,7 +658,16 @@ bool TabsUpdateFunction::UpdateURL(const std::string& url_string,
   // will stay in the omnibox - see https://crbug.com/1085779.
   load_params.transition_type = ui::PAGE_TRANSITION_FROM_API;
 
-  web_contents_->GetController().LoadURLWithParams(load_params);
+  base::WeakPtr<content::NavigationHandle> navigation_handle =
+      web_contents_->GetController().LoadURLWithParams(load_params);
+  // Navigation can fail for any number of reasons at the content layer.
+  // Unfortunately, we can't provide a detailed error message here, because
+  // there are too many possible triggers. At least notify the extension that
+  // the update failed.
+  if (!navigation_handle) {
+    *error = "Navigation rejected.";
+    return false;
+  }
 
   DCHECK_EQ(url,
             web_contents_->GetController().GetPendingEntry()->GetVirtualURL());
@@ -683,6 +699,8 @@ ExtensionFunction::ResponseValue TabsUpdateFunction::GetResult() {
     tab.active = api_web_contents->IsFocused();
   tab.muted_info = CreateMutedInfo(web_contents_);
   tab.audible = web_contents_->IsCurrentlyAudible();
+  // TODO: Add proper support for split views
+  tab.split_view_id = -1;
 
   return ArgumentList(tabs::Get::Results::Create(std::move(tab)));
 }

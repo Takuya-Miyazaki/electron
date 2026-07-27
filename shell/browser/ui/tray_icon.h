@@ -18,7 +18,7 @@ namespace electron {
 
 class TrayIcon {
  public:
-  static TrayIcon* Create(std::optional<UUID> guid);
+  static TrayIcon* Create(std::optional<base::Uuid> guid);
 
 #if BUILDFLAG(IS_WIN)
   using ImageType = HICON;
@@ -41,7 +41,7 @@ class TrayIcon {
   // Sets the hover text for this status icon. This is also used as the label
   // for the menu item which is created as a replacement for the status icon
   // click action on platforms that do not support custom click actions for the
-  // status icon (e.g. Ubuntu Unity).
+  // status icon.
   virtual void SetToolTip(const std::string& tool_tip) = 0;
 
 #if BUILDFLAG(IS_MAC)
@@ -98,6 +98,8 @@ class TrayIcon {
 
   // Returns the bounds of tray icon.
   virtual gfx::Rect GetBounds();
+
+  virtual void SetAutoSaveName(const std::string& name);
 
   void AddObserver(TrayIconObserver* obs) { observers_.AddObserver(obs); }
   void RemoveObserver(TrayIconObserver* obs) { observers_.RemoveObserver(obs); }

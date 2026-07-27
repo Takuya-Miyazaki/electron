@@ -6,15 +6,19 @@
 
 #include <vector>
 
+#include "shell/common/gc_plugin.h"
+
 #import <ApplicationServices/ApplicationServices.h>
 #import <Cocoa/Cocoa.h>
 
 @interface MacLockMonitor : NSObject {
  @private
+  GC_PLUGIN_IGNORE("ObjC class cannot participate in cppgc tracing")
   std::vector<electron::api::PowerMonitor*> emitters;
 }
 
 - (void)addEmitter:(electron::api::PowerMonitor*)monitor_;
+- (void)removeEmitter:(electron::api::PowerMonitor*)monitor_;
 
 @end
 
@@ -33,17 +37,6 @@
     [distributed_center addObserver:self
                            selector:@selector(onScreenUnlocked:)
                                name:@"com.apple.screenIsUnlocked"
-                             object:nil];
-    // A notification that the workspace posts before the machine goes to sleep.
-    [distributed_center addObserver:self
-                           selector:@selector(isSuspending:)
-                               name:NSWorkspaceWillSleepNotification
-                             object:nil];
-    // A notification that the workspace posts when the machine wakes from
-    // sleep.
-    [distributed_center addObserver:self
-                           selector:@selector(isResuming:)
-                               name:NSWorkspaceDidWakeNotification
                              object:nil];
 
     NSNotificationCenter* shared_center =
@@ -73,16 +66,8 @@
   self->emitters.push_back(monitor_);
 }
 
-- (void)isSuspending:(NSNotification*)notify {
-  for (auto* emitter : self->emitters) {
-    emitter->Emit("suspend");
-  }
-}
-
-- (void)isResuming:(NSNotification*)notify {
-  for (auto* emitter : self->emitters) {
-    emitter->Emit("resume");
-  }
+- (void)removeEmitter:(electron::api::PowerMonitor*)monitor_ {
+  std::erase(self->emitters, monitor_);
 }
 
 - (void)onScreenLocked:(NSNotification*)notification {
@@ -119,6 +104,11 @@ void PowerMonitor::InitPlatformSpecificMonitors() {
   if (!g_lock_monitor)
     g_lock_monitor = [[MacLockMonitor alloc] init];
   [g_lock_monitor addEmitter:this];
+}
+
+void PowerMonitor::DestroyPlatformSpecificMonitors() {
+  if (g_lock_monitor)
+    [g_lock_monitor removeEmitter:this];
 }
 
 }  // namespace electron::api

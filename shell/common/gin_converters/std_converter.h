@@ -5,10 +5,12 @@
 #ifndef ELECTRON_SHELL_COMMON_GIN_CONVERTERS_STD_CONVERTER_H_
 #define ELECTRON_SHELL_COMMON_GIN_CONVERTERS_STD_CONVERTER_H_
 
+#include <array>
 #include <cstddef>
 #include <functional>
 #include <map>
 #include <set>
+#include <span>
 #include <type_traits>
 #include <utility>
 
@@ -27,6 +29,33 @@ v8::Local<v8::Value> ConvertToV8(v8::Isolate* isolate, T&& input) {
   return Converter<typename std::remove_reference<T>::type>::ToV8(
       isolate, std::forward<T>(input));
 }
+
+template <typename T>
+struct Converter<std::span<T>> {
+  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
+                                   const std::span<const T>& span) {
+    uint32_t idx = 0;
+    auto context = isolate->GetCurrentContext();
+    auto result = v8::Array::New(isolate, static_cast<int>(span.size()));
+    for (const auto& val : span) {
+      v8::MaybeLocal<v8::Value> maybe = Converter<T>::ToV8(isolate, val);
+      v8::Local<v8::Value> element;
+      if (!maybe.ToLocal(&element))
+        return {};
+      if (!result->CreateDataProperty(context, idx++, element).FromMaybe(false))
+        NOTREACHED() << "CreateDataProperty should always succeed here.";
+    }
+    return result;
+  }
+};
+
+template <typename T, size_t N>
+struct Converter<std::array<T, N>> {
+  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
+                                   const std::array<T, N>& array) {
+    return Converter<std::span<T>>::ToV8(isolate, std::span{array});
+  }
+};
 
 #if !BUILDFLAG(IS_LINUX)
 template <>
@@ -100,10 +129,12 @@ struct Converter<std::set<T>> {
     v8::Local<v8::Array> result(
         v8::Array::New(isolate, static_cast<int>(val.size())));
     auto context = isolate->GetCurrentContext();
-    typename std::set<T>::const_iterator it;
-    int i;
-    for (i = 0, it = val.begin(); it != val.end(); ++it, ++i)
-      result->Set(context, i, Converter<T>::ToV8(isolate, *it)).Check();
+    uint32_t i = 0;
+    for (const T& item : val) {
+      result
+          ->CreateDataProperty(context, i++, Converter<T>::ToV8(isolate, item))
+          .Check();
+    }
     return result;
   }
   static bool FromV8(v8::Isolate* isolate,
@@ -121,7 +152,7 @@ struct Converter<std::set<T>> {
       if (!Converter<T>::FromV8(isolate,
                                 array->Get(context, i).ToLocalChecked(), &item))
         return false;
-      result.insert(item);
+      result.insert(std::move(item));
     }
 
     out->swap(result);
@@ -129,18 +160,19 @@ struct Converter<std::set<T>> {
   }
 };
 
-template <typename K, typename V>
-struct Converter<std::map<K, V>> {
+template <typename K, typename V, typename Compare>
+struct Converter<std::map<K, V, Compare>> {
   static bool FromV8(v8::Isolate* isolate,
                      v8::Local<v8::Value> value,
-                     std::map<K, V>* out) {
+                     std::map<K, V, Compare>* out) {
     if (!value->IsObject())
       return false;
     out->clear();
     v8::Local<v8::Context> context = isolate->GetCurrentContext();
     v8::Local<v8::Object> obj = value.As<v8::Object>();
     v8::Local<v8::Array> keys = obj->GetPropertyNames(context).ToLocalChecked();
-    for (uint32_t i = 0; i < keys->Length(); ++i) {
+    const uint32_t length = keys->Length();
+    for (uint32_t i = 0; i < length; ++i) {
       v8::MaybeLocal<v8::Value> maybe_v8key = keys->Get(context, i);
       if (maybe_v8key.IsEmpty())
         return false;
@@ -153,13 +185,13 @@ struct Converter<std::map<K, V>> {
       if (!ConvertFromV8(isolate, v8key, &key) ||
           !ConvertFromV8(isolate, maybe_v8value.ToLocalChecked(), &out_value))
         return false;
-      (*out)[key] = std::move(out_value);
+      (*out)[std::move(key)] = std::move(out_value);
     }
     return true;
   }
 
   static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
-                                   const std::map<K, V>& dict) {
+                                   const std::map<K, V, Compare>& dict) {
     v8::Local<v8::Object> obj = v8::Object::New(isolate);
     v8::Local<v8::Context> context = isolate->GetCurrentContext();
     for (const auto& it : dict) {
@@ -215,7 +247,7 @@ bool FromV8WithLookup(v8::Isolate* isolate,
   if (key_transform)
     key_transform(key);
 
-  if (const auto* iter = table.find(key); iter != table.end()) {
+  if (auto iter = table.find(key); iter != table.end()) {
     *out = iter->second;
     return true;
   }
