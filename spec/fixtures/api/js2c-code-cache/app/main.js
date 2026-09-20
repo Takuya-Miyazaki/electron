@@ -6,6 +6,8 @@ const path = require('node:path');
 const FIX = __dirname;
 const PRELOAD = path.join(FIX, '..', 'report-preload.js');
 const UTIL_CHILD = path.join(FIX, '..', 'util-child.js');
+const RUN_AS_NODE_CHILD = path.join(FIX, '..', 'run-as-node-child.js');
+const childProcess = require('node:child_process');
 const os = require('node:os');
 app.setPath('userData', path.join(os.tmpdir(), 'js2c-cc-ud-' + process.pid));
 const v8Util = process._linkedBinding('electron_common_v8_util');
@@ -26,9 +28,15 @@ async function rendererStatus(sandbox) {
     webPreferences: {
       sandbox,
       contextIsolation: true,
+      // A sandboxed renderer only runs a bundle for the <webview> element.
+      webviewTag: sandbox,
       preload: PRELOAD,
       nodeIntegration: false,
-      additionalArguments: ['--js2c-cc-channel=' + channel]
+      additionalArguments: [
+        '--js2c-cc-channel=' + channel,
+        // Lets the sandboxed preload reach the v8 util binding.
+        '--unsafely-expose-electron-internals-for-testing'
+      ]
     }
   });
   try {
@@ -61,7 +69,17 @@ app.whenReady().then(async () => {
       }),
       'utility'
     );
-    console.log('JS2C_RESULT ' + JSON.stringify({ browser, sandbox, renderer, utility }));
+    console.log('JS2C_STEP runAsNode');
+    // child_process.fork() runs the child with ELECTRON_RUN_AS_NODE=1.
+    const runAsNode = await withTimeout(
+      new Promise((resolve, reject) => {
+        const child = childProcess.fork(RUN_AS_NODE_CHILD, [], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+        child.once('message', (m) => resolve(m));
+        child.once('error', reject);
+      }),
+      'runAsNode'
+    );
+    console.log('JS2C_RESULT ' + JSON.stringify({ browser, sandbox, renderer, utility, runAsNode }));
     setTimeout(() => app.exit(0), 100);
   } catch (err) {
     console.log('JS2C_ERROR ' + String((err && err.stack) || err));

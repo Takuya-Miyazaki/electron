@@ -2,6 +2,7 @@
 # Use of this source code is governed by the MIT license that can be
 # found in the LICENSE file.
 
+import("//build/config/features.gni")
 import("//build/config/ozone.gni")
 import("//build/config/ui.gni")
 import("//components/spellcheck/spellcheck_build_features.gni")
@@ -79,6 +80,7 @@ static_library("chrome") {
     "//chrome/browser/picture_in_picture/picture_in_picture_window_manager_uma_helper.h",
     "//chrome/browser/picture_in_picture/scoped_picture_in_picture_occlusion_observation.cc",
     "//chrome/browser/picture_in_picture/scoped_picture_in_picture_occlusion_observation.h",
+    "//chrome/browser/picture_in_picture/video_overlay_window.h",
     "//chrome/browser/platform_util.cc",
     "//chrome/browser/platform_util.h",
     "//chrome/browser/predictors/predictors_features.cc",
@@ -247,11 +249,22 @@ static_library("chrome") {
       "//chrome/browser/ui/views/status_icons/status_icon_linux_dbus.cc",
       "//chrome/browser/ui/views/status_icons/status_icon_linux_dbus.h",
     ]
-    sources += [
-      "//chrome/browser/ui/views/dark_mode_manager_linux.cc",
-      "//chrome/browser/ui/views/dark_mode_manager_linux.h",
+    public_deps += [
+      "//components/dbus",
+      "//ui/linux:dark_mode_manager",
     ]
-    public_deps += [ "//components/dbus" ]
+    if (use_aura && use_dbus) {
+      sources += [
+        "//chrome/browser/ui/views/eye_dropper/eye_dropper_portal.cc",
+        "//chrome/browser/ui/views/eye_dropper/eye_dropper_portal.h",
+      ]
+      deps += [
+        "//build/config/linux/dbus:buildflags",
+        "//dbus",
+        "//ui/aura",
+        "//ui/linux:linux_ui",
+      ]
+    }
   }
 
   if (is_win) {
@@ -452,9 +465,7 @@ source_set("chrome_spellchecker") {
 
   if (enable_builtin_spellchecker) {
     sources += [
-      "//chrome/browser/profiles/profile_keyed_service_factory.cc",
       "//chrome/browser/profiles/profile_keyed_service_factory.h",
-      "//chrome/browser/profiles/profile_selections.cc",
       "//chrome/browser/profiles/profile_selections.h",
       "//chrome/browser/spellchecker/spell_check_host_chrome_impl.cc",
       "//chrome/browser/spellchecker/spell_check_host_chrome_impl.h",
@@ -468,6 +479,8 @@ source_set("chrome_spellchecker") {
       "//chrome/browser/spellchecker/spellcheck_hunspell_dictionary.h",
       "//chrome/browser/spellchecker/spellcheck_service.cc",
       "//chrome/browser/spellchecker/spellcheck_service.h",
+      "//electron/shell/browser/profiles/profile_keyed_service_factory_stub.cc",
+      "//electron/shell/browser/profiles/profile_selections_stub.cc",
     ]
 
     if (!is_mac) {

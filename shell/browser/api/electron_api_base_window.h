@@ -50,6 +50,10 @@ class BaseWindow : public gin_helper::TrackableObject<BaseWindow>,
 
   static void BuildPrototype(v8::Isolate* isolate,
                              v8::Local<v8::FunctionTemplate> prototype);
+  // The constructor's template, created on first use; BrowserWindow inherits
+  // from it.
+  static v8::Local<v8::FunctionTemplate> GetConstructorTemplate(
+      v8::Isolate* isolate);
 
   // Clears window state from the Local State JSON file in
   // app.getPath('userData') via PrefService.
@@ -61,12 +65,24 @@ class BaseWindow : public gin_helper::TrackableObject<BaseWindow>,
   const NativeWindow* window() const { return window_.get(); }
   NativeWindow* window() { return window_.get(); }
 
+  static BaseWindow* GetFocusedWindow();
+  // Null unless |value| is a live BaseWindow.
+  static BaseWindow* FromValue(v8::Isolate* isolate,
+                               v8::Local<v8::Value> value);
+  // |window| may be dangling.
+  static bool IsLive(const BaseWindow* window);
+  void SetMenuNatively(Menu* menu);
+  void RemoveMenu();
+
  protected:
   // Common constructor.
   BaseWindow(v8::Isolate* isolate, const gin_helper::Dictionary& options);
   // Creating independent BaseWindow instance.
   BaseWindow(gin::Arguments* args, const gin_helper::Dictionary& options);
   ~BaseWindow() override;
+
+  // gin_helper::WrappableBase:
+  void OnWrapped(v8::Isolate* isolate) override;
 
   // TrackableObject:
   void InitWith(v8::Isolate* isolate, v8::Local<v8::Object> wrapper) override;
@@ -170,6 +186,8 @@ class BaseWindow : public gin_helper::TrackableObject<BaseWindow>,
   void SetPosition(int x, int y, gin::Arguments* args);
   std::array<int, 2U> GetPosition() const;
   void SetTitle(const std::string& title);
+  void SetTitleFromPage(const std::string& title);
+  bool SetTitleFromPageIfNotSetFromApi(const std::string& title);
   std::string GetTitle() const;
   void SetAccessibleTitle(const std::string& title);
   std::string GetAccessibleTitle() const;
@@ -200,7 +218,6 @@ class BaseWindow : public gin_helper::TrackableObject<BaseWindow>,
   void SetFocusable(bool focusable);
   bool IsFocusable() const;
   void SetMenu(v8::Isolate* isolate, v8::Local<v8::Value> menu);
-  void RemoveMenu();
   void SetParentWindow(v8::Local<v8::Value> value, gin::Arguments* args);
   std::string GetMediaSourceId() const;
   v8::Local<v8::Value> GetNativeWindowHandle();
@@ -306,6 +323,8 @@ class BaseWindow : public gin_helper::TrackableObject<BaseWindow>,
 
   // Reference to JS wrapper to prevent garbage collection.
   v8::Global<v8::Value> self_ref_;
+
+  bool title_set_from_api_ = false;
 
   base::WeakPtrFactory<BaseWindow> weak_factory_{this};
 };

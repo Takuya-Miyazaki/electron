@@ -38,13 +38,16 @@
 #include "shell/renderer/electron_api_service_impl.h"
 #include "shell/renderer/electron_autofill_agent.h"
 #include "shell/renderer/oom_stack_trace.h"
+#include "shell/renderer/security_warnings.h"
 #include "third_party/abseil-cpp/absl/strings/str_format.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
 #include "third_party/blink/public/common/web_preferences/web_preferences.h"
 #include "third_party/blink/public/platform/web_runtime_features.h"
-#include "third_party/blink/public/web/blink.h"
+#include "third_party/blink/public/platform/web_security_origin.h"
+#include "third_party/blink/public/platform/web_string.h"
 #include "third_party/blink/public/web/web_custom_element.h"  // NOLINT(build/include_alpha)
+#include "third_party/blink/public/web/web_frame.h"
 #include "third_party/blink/public/web/web_frame_widget.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "third_party/blink/public/web/web_plugin_params.h"
@@ -130,9 +133,16 @@ bool IsDevTools(content::RenderFrame* render_frame) {
       "devtools");
 }
 
+// A DevTools extension panel or devtools_page: an extension document hosted
+// inside the DevTools front-end. A chrome-extension:// frame embedded anywhere
+// else (e.g. a web-accessible resource inside a regular page) is not one.
 bool IsDevToolsExtension(content::RenderFrame* render_frame) {
-  return render_frame->GetWebFrame()->GetDocument().Url().ProtocolIs(
-      "chrome-extension");
+  blink::WebLocalFrame* frame = render_frame->GetWebFrame();
+  if (!frame->GetDocument().Url().ProtocolIs("chrome-extension"))
+    return false;
+  blink::WebFrame* top = frame->Top();
+  return top && top != frame &&
+         top->GetSecurityOrigin().Protocol() == "devtools";
 }
 
 }  // namespace
@@ -339,6 +349,7 @@ void RendererClientBase::RenderFrameCreated(
   // Note: ElectronApiServiceImpl has to be created now to capture the
   // DidCreateDocumentElement event.
   new ElectronApiServiceImpl(render_frame, this);
+  MaybeAddSecurityWarnings(render_frame);
 
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
   auto* dispatcher = extensions_renderer_client_->dispatcher();
@@ -382,10 +393,26 @@ void RendererClientBase::DidCreateScriptContext(
   RegisterOomStackTraceCallback(isolate);
 }
 
+bool RendererClientBase::HasScriptsToInject(
+    content::RenderFrame* render_frame) const {
+  return true;
+}
+
 void RendererClientBase::DidClearWindowObject(
     content::RenderFrame* render_frame) {
-  // Make sure every page will get a script context created.
-  render_frame->GetWebFrame()->ExecuteScript(blink::WebScriptSource("void 0"));
+  // Blink only creates a document's main-world script context once the page
+  // runs script. Preload scripts and Node.js have to run even in a document
+  // with no scripts of its own, so force the context for the frames Electron
+  // injects into (see ShouldLoadPreload()); leave every other frame alone.
+  const auto& prefs = render_frame->GetBlinkPreferences();
+  if ((render_frame->IsMainFrame() || prefs.node_integration_in_sub_frames ||
+       IsDevTools(render_frame) || IsDevToolsExtension(render_frame)) &&
+      HasScriptsToInject(render_frame)) {
+    blink::WebLocalFrame* web_frame = render_frame->GetWebFrame();
+    v8::HandleScope handle_scope(
+        web_frame->GetAgentGroupScheduler()->Isolate());
+    web_frame->MainWorldScriptContext();
+  }
 }
 
 bool RendererClientBase::OverrideCreatePlugin(
@@ -494,15 +521,6 @@ void RendererClientBase::RunScriptsAtDocumentEnd(
 #endif
 }
 
-bool RendererClientBase::AllowScriptExtensionForServiceWorker(
-    const url::Origin& script_origin) {
-#if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
-  return script_origin.scheme() == extensions::kExtensionScheme;
-#else
-  return false;
-#endif
-}
-
 void RendererClientBase::DidInitializeServiceWorkerContextOnWorkerThread(
     blink::WebServiceWorkerContextProxy* context_proxy,
     const GURL& service_worker_scope,
@@ -587,11 +605,26 @@ v8::Local<v8::Context> RendererClientBase::GetContext(
     v8::Isolate* isolate) const {
   auto* render_frame = content::RenderFrame::FromWebFrame(frame);
   DCHECK(render_frame);
+  if (render_frame) {
+    v8::Local<v8::Context> env_context = GetEnvironmentContext(render_frame);
+    if (!env_context.IsEmpty())
+      return env_context;
+  }
   if (render_frame && render_frame->GetBlinkPreferences().context_isolation)
     return frame->GetScriptContextFromWorldId(isolate,
                                               WorldIDs::ISOLATED_WORLD_ID);
   else
     return frame->MainWorldScriptContext();
+}
+
+v8::Local<v8::Context> RendererClientBase::GetEnvironmentContext(
+    content::RenderFrame* render_frame) const {
+  return {};
+}
+
+std::optional<int> RendererClientBase::GetEnvironmentWorldId(
+    content::RenderFrame* render_frame) const {
+  return std::nullopt;
 }
 
 bool RendererClientBase::IsWebViewFrame(
@@ -640,7 +673,7 @@ void RendererClientBase::SetupMainWorldOverrides(
   v8::Local<v8::Value> guest_view_internal;
   if (global.GetHidden("guestViewInternal", &guest_view_internal)) {
     auto result = api::PassValueToOtherContext(
-        isolate, source_context, isolate, context, guest_view_internal,
+        isolate, source_context, context, guest_view_internal,
         source_context->Global(), false, api::BridgeErrorTarget::kSource);
     if (!result.IsEmpty()) {
       isolated_api.Set("guestViewInternal", result.ToLocalChecked());

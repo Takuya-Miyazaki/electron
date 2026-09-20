@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/strings/sys_string_conversions.h"
 #include "content/public/browser/browser_thread.h"
 
@@ -167,9 +168,11 @@ void FinishTransactionByDate(const std::string& date) {
 
   for (SKPaymentTransaction* transaction in SKPaymentQueue.defaultQueue
            .transactions) {
+    NSDate* purchaseDate = transaction.transactionDate;
+    if (!purchaseDate)
+      continue;
     if ([transactionDate
-            isEqualToString:[dateFormatter
-                                stringFromDate:transaction.transactionDate]]) {
+            isEqualToString:[dateFormatter stringFromDate:purchaseDate]]) {
       [[SKPaymentQueue defaultQueue] finishTransaction:transaction];
     }
   }
@@ -178,7 +181,7 @@ void FinishTransactionByDate(const std::string& date) {
 std::string GetReceiptURL() {
   NSURL* receiptURL = [[NSBundle mainBundle] appStoreReceiptURL];
   if (receiptURL != nil) {
-    return std::string([[receiptURL path] UTF8String]);
+    return base::SysNSStringToUTF8(receiptURL.path);
   } else {
     return "";
   }

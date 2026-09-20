@@ -5,9 +5,9 @@
 #ifndef ELECTRON_SHELL_BROWSER_LOGIN_HANDLER_H_
 #define ELECTRON_SHELL_BROWSER_LOGIN_HANDLER_H_
 
+#include "base/memory/weak_ptr.h"
 #include "base/process/process_handle.h"
 #include "content/public/browser/login_delegate.h"
-#include "net/http/http_response_headers.h"
 
 namespace content {
 class WebContents;
@@ -15,6 +15,10 @@ class WebContents;
 
 namespace gin {
 class Arguments;
+}
+
+namespace net {
+class HttpResponseHeaders;
 }
 
 namespace electron {
@@ -47,7 +51,8 @@ class LoginHandler : public content::LoginDelegate {
 
  private:
   void EmitEvent(net::AuthChallengeInfo auth_info,
-                 content::WebContents* web_contents,
+                 bool has_web_contents,
+                 base::WeakPtr<content::WebContents> web_contents,
                  bool is_request_for_primary_main_frame,
                  bool is_request_for_navigation,
                  base::ProcessId process_id,

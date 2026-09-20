@@ -6,6 +6,7 @@
 #define ELECTRON_SHELL_RENDERER_RENDERER_CLIENT_BASE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "content/public/renderer/content_renderer_client.h"
@@ -63,6 +64,11 @@ class RendererClientBase : public content::ContentRendererClient
                                         v8::Local<v8::Context> context,
                                         content::RenderFrame* render_frame) = 0;
   virtual void DidClearWindowObject(content::RenderFrame* render_frame);
+
+  // Whether Electron has anything to set up in the script contexts of
+  // |render_frame| (preload scripts, Node.js, the <webview> element). When it
+  // does not, no context or isolated world is created on the frame's behalf.
+  virtual bool HasScriptsToInject(content::RenderFrame* render_frame) const;
   virtual void SetupMainWorldOverrides(v8::Isolate* isolate,
                                        v8::Local<v8::Context> context,
                                        content::RenderFrame* render_frame);
@@ -74,6 +80,18 @@ class RendererClientBase : public content::ContentRendererClient
   v8::Local<v8::Context> GetContext(blink::WebLocalFrame* frame,
                                     v8::Isolate* isolate) const;
 
+  // The context of |render_frame|'s Node.js environment, or an empty handle if
+  // it has none. Once a frame has an environment, the Electron API stays in
+  // that context until it is released, even if the frame's WebPreferences
+  // change: a window.open() child starts with its opener's preferences and
+  // gets its own later.
+  virtual v8::Local<v8::Context> GetEnvironmentContext(
+      content::RenderFrame* render_frame) const;
+
+  // The world of GetEnvironmentContext(), if |render_frame| has an environment.
+  virtual std::optional<int> GetEnvironmentWorldId(
+      content::RenderFrame* render_frame) const;
+
   static void AllowGuestViewElementDefinition(
       v8::Isolate* isolate,
       v8::Local<v8::Object> context,
@@ -83,6 +101,14 @@ class RendererClientBase : public content::ContentRendererClient
                       v8::Local<v8::Context> context,
                       content::RenderFrame* render_frame) const;
 
+  // Whether Electron sets up its renderer API (and runs preload scripts) for
+  // documents in this frame: the main frame, DevTools, or any frame when
+  // nodeIntegrationInSubFrames is on, but never a <webview>'s placeholder
+  // iframe.
+  bool ShouldLoadPreload(v8::Isolate* isolate,
+                         v8::Local<v8::Context> context,
+                         content::RenderFrame* render_frame) const;
+
 #if BUILDFLAG(ENABLE_BUILTIN_SPELLCHECKER)
   SpellCheck* GetSpellCheck() { return spellcheck_.get(); }
 #endif
@@ -91,10 +117,6 @@ class RendererClientBase : public content::ContentRendererClient
   void BindProcess(v8::Isolate* isolate,
                    gin_helper::Dictionary* process,
                    content::RenderFrame* render_frame);
-
-  bool ShouldLoadPreload(v8::Isolate* isolate,
-                         v8::Local<v8::Context> context,
-                         content::RenderFrame* render_frame) const;
 
   // content::ContentRendererClient:
   void RenderThreadStarted() override;
@@ -117,8 +139,6 @@ class RendererClientBase : public content::ContentRendererClient
   void RunScriptsAtDocumentEnd(content::RenderFrame* render_frame) override;
   void RunScriptsAtDocumentIdle(content::RenderFrame* render_frame) override;
 
-  bool AllowScriptExtensionForServiceWorker(
-      const url::Origin& script_origin) override;
   void DidInitializeServiceWorkerContextOnWorkerThread(
       blink::WebServiceWorkerContextProxy* context_proxy,
       const GURL& service_worker_scope,

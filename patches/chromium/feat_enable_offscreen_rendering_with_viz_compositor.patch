@@ -8,7 +8,7 @@ rendering with the viz compositor by way of a custom HostDisplayClient
 and LayeredWindowUpdater.
 
 diff --git a/components/viz/host/host_display_client.cc b/components/viz/host/host_display_client.cc
-index 65e6d28734051dc6ba0201b7b09a91ac733e3ff9..f8d66e68f7fdb4944a667ec10ba227fa62af7728 100644
+index 65e6d28734051dc6ba0201b7b09a91ac733e3ff9..ea6c92624466dbfdec21880632d8a265776a9d9f 100644
 --- a/components/viz/host/host_display_client.cc
 +++ b/components/viz/host/host_display_client.cc
 @@ -50,9 +50,9 @@ void HostDisplayClient::OnDisplayReceivedCALayerParams(
@@ -28,9 +28,9 @@ index 65e6d28734051dc6ba0201b7b09a91ac733e3ff9..f8d66e68f7fdb4944a667ec10ba227fa
        std::make_unique<LayeredWindowUpdaterImpl>(widget_, std::move(receiver));
 +
 +#else
-+  CHECK(false) << "Chromium is calling CreateLayeredWindowUpdater for non-OSR "
-+                  "windows on POSIX platforms, something is wrong with "
-+                  "Electron's OSR implementation.";
++  // Outside Windows only Electron's offscreen display client provides a
++  // LayeredWindowUpdater; drop the request for any other window.
++  DLOG(ERROR) << "CreateLayeredWindowUpdater called for a non-OSR window";
 +#endif
  }
 +
@@ -90,7 +90,7 @@ index 8af69cac78b7488d28f1f05ccb174793fe5148cd..9f74e511c263d147b5fbe81fe100d217
   private:
    const HWND hwnd_;
 diff --git a/components/viz/service/BUILD.gn b/components/viz/service/BUILD.gn
-index ef1de973c57969f7980ae57a368e5f4fdd266df4..3fe726210324493e8c77c283454fbfc7b85badda 100644
+index 9660bf70de66562eac16aa318e303fa66c6bfdf7..20acf7d67f5cbec632e255c798ab60a79eaf9bbc 100644
 --- a/components/viz/service/BUILD.gn
 +++ b/components/viz/service/BUILD.gn
 @@ -180,6 +180,8 @@ viz_component("service") {
@@ -522,7 +522,7 @@ index 4f9e8946fa02d859e92a6896beba82721914f868..78486eaa993ee7ffd5188b31503de7dd
    waiting_on_draw_ack_ = true;
  
 diff --git a/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc b/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc
-index dd725f8cf0819e1216afa638f3f819071adff851..a920fcd129dda56c523a1069b9f3ea4590d78e9d 100644
+index be30bdc58bbd50fc735772106a9dda78fb5ddf1f..138238829b9d1a860a2a6e19f3bfb1fa6f4abea4 100644
 --- a/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc
 +++ b/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc
 @@ -131,7 +131,8 @@ RootCompositorFrameSinkImpl::Create(
@@ -564,7 +564,7 @@ index 399fba1a3d4e601dc2cdd5f1f4def8b7fd7a3011..8bcbe0d26c80323155d536c0d3a177a1
    gpu::SyncPointManager* GetSyncPointManager() override;
    gpu::Scheduler* GetGpuScheduler() override;
 diff --git a/content/browser/compositor/viz_process_transport_factory.cc b/content/browser/compositor/viz_process_transport_factory.cc
-index 236c555933a572f8d3d2165db8f3b0425f187321..d265f0c597c993845e806163f084b7d09fa2e04d 100644
+index 7ca2539e761b40c55671b815e8403ffe59c18d0f..97208fb50f1207591bd8ac6ddef307f6717a6b0a 100644
 --- a/content/browser/compositor/viz_process_transport_factory.cc
 +++ b/content/browser/compositor/viz_process_transport_factory.cc
 @@ -394,8 +394,14 @@ void VizProcessTransportFactory::OnEstablishedGpuChannel(
@@ -585,7 +585,7 @@ index 236c555933a572f8d3d2165db8f3b0425f187321..d265f0c597c993845e806163f084b7d0
        compositor_data.display_client->GetBoundRemote(resize_task_runner_);
    mojo::AssociatedRemote<viz::mojom::ExternalBeginFrameController>
 diff --git a/services/viz/privileged/mojom/compositing/display_private.mojom b/services/viz/privileged/mojom/compositing/display_private.mojom
-index 8b274ed5c6ad8f18d8796da2581b51ca32e9317c..95ce03d0d02274b8cc937918e26acb4d8164f3e6 100644
+index f0899f2c823dd77bdff63e1f9ae1d89ce1d85caa..fb1b88b359d4caa1b1162b9e4c4200e82f0c764a 100644
 --- a/services/viz/privileged/mojom/compositing/display_private.mojom
 +++ b/services/viz/privileged/mojom/compositing/display_private.mojom
 @@ -124,7 +124,6 @@ interface DisplayClient {
@@ -620,7 +620,7 @@ index 2f462f0deb5fc8a637457243fb5d5849fc214d14..695869b83cefaa24af93a2e11b39de05
 +  Draw(gfx.mojom.Rect damage_rect) => ();
  };
 diff --git a/ui/compositor/compositor.h b/ui/compositor/compositor.h
-index 2275ebd9d6d44886bcc76f713b6594a28b7548fe..aac30397eb4750e2a009b887073be6cc923f3424 100644
+index 8a8a9d14d52d821205d7dd76e7e1df78c534e7b0..12b9261ca465d7f7293a4941cfde9719f6d97135 100644
 --- a/ui/compositor/compositor.h
 +++ b/ui/compositor/compositor.h
 @@ -89,6 +89,7 @@ class DisplayPrivate;
@@ -657,7 +657,7 @@ index 2275ebd9d6d44886bcc76f713b6594a28b7548fe..aac30397eb4750e2a009b887073be6cc
    // Sets the root of the layer tree drawn by this Compositor. The root layer
    // must have no parent. The compositor's root layer is reset if the root layer
    // is destroyed. NULL can be passed to reset the root layer, in which case the
-@@ -624,6 +637,8 @@ class COMPOSITOR_EXPORT Compositor
+@@ -626,6 +639,8 @@ class COMPOSITOR_EXPORT Compositor
        simple_begin_frame_observers_;
    std::unique_ptr<ui::HostBeginFrameObserver> host_begin_frame_observer_;
  

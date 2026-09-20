@@ -11,7 +11,6 @@
 
 #include "base/task/single_thread_task_runner.h"
 #include "components/prefs/scoped_user_pref_update.h"
-#include "electron/buildflags/buildflags.h"
 #include "gin/dictionary.h"
 #include "shell/browser/api/electron_api_menu.h"
 #include "shell/browser/api/electron_api_view.h"
@@ -31,6 +30,7 @@
 #include "shell/common/gin_converters/optional_converter.h"
 #include "shell/common/gin_converters/value_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
+#include "shell/common/gin_helper/event_emitter_template.h"
 #include "shell/common/gin_helper/handle.h"
 #include "shell/common/gin_helper/object_template_builder.h"
 #include "shell/common/gin_helper/persistent_dictionary.h"
@@ -101,6 +101,11 @@ v8::Local<v8::Value> ToBuffer(v8::Isolate* isolate,
 
 BaseWindow::BaseWindow(v8::Isolate* isolate,
                        const gin_helper::Dictionary& options) {
+  // make sure we don't override title on back/forward navigation
+  // if the title is provided
+  if (std::string title; options.Get(options::kTitle, &title))
+    title_set_from_api_ = true;
+
   // The parent window.
   gin_helper::Handle<BaseWindow> parent;
   if (options.Get("parent", &parent) && !parent.IsEmpty())
@@ -126,6 +131,15 @@ BaseWindow::BaseWindow(v8::Isolate* isolate,
   if (options.Get(options::kIcon, &icon)) {
     SetIconImpl(isolate, icon, NativeImage::OnConvertError::kWarn);
   }
+#endif
+}
+
+void BaseWindow::OnWrapped(v8::Isolate* isolate) {
+#if !BUILDFLAG(IS_MAC)
+  // The application menu is each window's menu bar until it sets its own,
+  // which the JS that runs while constructing it may already do.
+  if (Menu* menu = Menu::application_menu())
+    SetMenuNatively(menu);
 #endif
 }
 
@@ -236,10 +250,14 @@ void BaseWindow::OnWindowHide() {
 }
 
 void BaseWindow::OnWindowMaximize() {
+  // Persist the display mode; bounds events fired during the transition
+  // are skipped by SaveWindowState, so nothing else would.
+  window_->DebouncedSaveWindowState();
   Emit("maximize");
 }
 
 void BaseWindow::OnWindowUnmaximize() {
+  window_->DebouncedSaveWindowState();
   Emit("unmaximize");
 }
 
@@ -290,10 +308,12 @@ void BaseWindow::OnWindowMoved() {
 }
 
 void BaseWindow::OnWindowEnterFullScreen() {
+  window_->DebouncedSaveWindowState();
   Emit("enter-full-screen");
 }
 
 void BaseWindow::OnWindowLeaveFullScreen() {
+  window_->DebouncedSaveWindowState();
   Emit("leave-full-screen");
 }
 
@@ -617,7 +637,22 @@ void BaseWindow::MoveTop() {
 }
 
 void BaseWindow::SetTitle(const std::string& title) {
+  title_set_from_api_ = true;
   window_->SetTitle(title);
+}
+
+void BaseWindow::SetTitleFromPage(const std::string& title) {
+  title_set_from_api_ = false;
+  window_->SetTitle(title);
+}
+
+bool BaseWindow::SetTitleFromPageIfNotSetFromApi(const std::string& title) {
+  if (title_set_from_api_) {
+    return false;
+  } else {
+    SetTitleFromPage(title);
+    return true;
+  }
 }
 
 std::string BaseWindow::GetTitle() const {
@@ -740,21 +775,54 @@ bool BaseWindow::IsFocusable() const {
   return window_->IsFocusable();
 }
 
+// static
+BaseWindow* BaseWindow::GetFocusedWindow() {
+  for (BaseWindow* window : GetAllNative()) {
+    if (window->window() && window->IsFocused())
+      return window;
+  }
+  return nullptr;
+}
+
+// static
+BaseWindow* BaseWindow::FromValue(v8::Isolate* isolate,
+                                  v8::Local<v8::Value> value) {
+  if (value.IsEmpty() || !value->IsObject())
+    return nullptr;
+  for (BaseWindow* window : GetAllNative()) {
+    if (window->window() && window->GetWrapper() == value)
+      return window;
+  }
+  return nullptr;
+}
+
+// static
+bool BaseWindow::IsLive(const BaseWindow* window) {
+  for (BaseWindow* live : GetAllNative()) {
+    if (live == window)
+      return live->window() != nullptr;
+  }
+  return false;
+}
+
+void BaseWindow::SetMenuNatively(Menu* menu) {
+  // We only want to update the menu if the menu has a non-zero item count,
+  // or we risk crashes.
+  if (menu->model()->GetItemCount() == 0) {
+    RemoveMenu();
+  } else {
+    window_->SetMenu(menu->model());
+  }
+  menu_ = menu;
+}
+
 void BaseWindow::SetMenu(v8::Isolate* isolate, v8::Local<v8::Value> value) {
   auto context = isolate->GetCurrentContext();
   Menu* menu = nullptr;
   v8::Local<v8::Object> object;
   if (value->IsObject() && value->ToObject(context).ToLocal(&object) &&
       gin::ConvertFromV8(isolate, value, &menu) && menu) {
-    // We only want to update the menu if the menu has a non-zero item count,
-    // or we risk crashes.
-    if (menu->model()->GetItemCount() == 0) {
-      RemoveMenu();
-    } else {
-      window_->SetMenu(menu->model());
-    }
-
-    menu_ = menu;
+    SetMenuNatively(menu);
   } else if (value->IsNull()) {
     RemoveMenu();
   } else {
@@ -1221,9 +1289,21 @@ bool BaseWindow::IsWindowNameValid(const gin_helper::Dictionary& options,
 }
 
 // static
+v8::Local<v8::FunctionTemplate> BaseWindow::GetConstructorTemplate(
+    v8::Isolate* isolate) {
+  static bool created = false;
+  if (!created) {
+    created = true;
+    SetConstructor(isolate, base::BindRepeating(&BaseWindow::New));
+  }
+  return GetConstructor(isolate);
+}
+
+// static
 void BaseWindow::BuildPrototype(v8::Isolate* isolate,
                                 v8::Local<v8::FunctionTemplate> prototype) {
   prototype->SetClassName(gin::StringToV8(isolate, "BaseWindow"));
+  prototype->Inherit(gin_helper::internal::GetEventEmitterTemplate(isolate));
   gin_helper::Destroyable::MakeDestroyable(isolate, prototype);
   gin_helper::ObjectTemplateBuilder(isolate, prototype->PrototypeTemplate())
       .SetMethod("setContentView", &BaseWindow::SetContentView)
@@ -1403,14 +1483,13 @@ void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Context> context,
                 void* priv) {
   v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
-  BaseWindow::SetConstructor(isolate, base::BindRepeating(&BaseWindow::New));
-
   gin_helper::Dictionary constructor(isolate,
-                                     BaseWindow::GetConstructor(isolate)
+                                     BaseWindow::GetConstructorTemplate(isolate)
                                          ->GetFunction(context)
                                          .ToLocalChecked());
   constructor.SetMethod("fromId", &BaseWindow::FromWeakMapID);
   constructor.SetMethod("getAllWindows", &BaseWindow::GetAll);
+  constructor.SetMethod("getFocusedWindow", &BaseWindow::GetFocusedWindow);
   constructor.SetMethod("clearPersistedState",
                         &BaseWindow::ClearPersistedState);
 

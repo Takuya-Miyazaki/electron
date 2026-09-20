@@ -4,6 +4,8 @@
 
 #include "shell/browser/api/electron_api_web_contents.h"
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 #include <list>
 #include <memory>
@@ -13,20 +15,27 @@
 #include <utility>
 #include <vector>
 
+#include "base/auto_reset.h"
 #include "base/base64.h"
 #include "base/command_line.h"
 #include "base/containers/fixed_flat_map.h"
 #include "base/containers/flat_set.h"
 #include "base/containers/id_map.h"
 #include "base/containers/map_util.h"
+#include "base/environment.h"
 #include "base/files/file_util.h"
+#include "base/functional/callback_helpers.h"
 #include "base/json/json_reader.h"
 #include "base/no_destructor.h"
+#include "base/numerics/safe_conversions.h"
+#include "base/power_monitor/power_monitor.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/current_thread.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/threading/scoped_blocking_call.h"
+#include "base/timer/elapsed_timer.h"
 #include "base/unguessable_token.h"
 #include "base/values.h"
 #include "chrome/browser/browser_process.h"
@@ -36,6 +45,8 @@
 #include "chrome/browser/ui/views/eye_dropper/eye_dropper.h"
 #include "chrome/common/pref_names.h"
 #include "components/embedder_support/user_agent_utils.h"
+#include "components/input/input_constants.h"
+#include "components/input/input_router.h"
 #include "components/input/native_web_keyboard_event.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/scoped_user_pref_update.h"
@@ -58,7 +69,9 @@
 #include "content/public/browser/download_request_utils.h"
 #include "content/public/browser/file_select_listener.h"
 #include "content/public/browser/keyboard_event_processing_result.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_details.h"
+#include "content/public/browser/navigation_discard_reason.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/navigation_entry_restore_context.h"
 #include "content/public/browser/navigation_handle.h"
@@ -73,6 +86,7 @@
 #include "content/public/browser/visibility.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/child_process_id.h"
+#include "content/public/common/page_visibility_state.h"
 #include "content/public/common/referrer_type_converters.h"
 #include "content/public/common/result_codes.h"
 #include "content/public/common/url_constants.h"
@@ -80,11 +94,12 @@
 #include "electron/mas.h"
 #include "gin/arguments.h"
 #include "gin/data_object_builder.h"
+#include "gin/dictionary.h"
 #include "gin/object_template_builder.h"
-#include "gin/wrappable.h"
 #include "media/base/mime_util.h"
 #include "mojo/public/cpp/base/big_buffer.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
+#include "mojo/public/cpp/bindings/callback_helpers.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/system/platform_handle.h"
@@ -93,6 +108,7 @@
 #include "services/network/public/mojom/web_sandbox_flags.mojom-shared.h"
 #include "services/resource_coordinator/public/cpp/memory_instrumentation/memory_instrumentation.h"
 #include "services/service_manager/public/cpp/interface_provider.h"
+#include "shell/browser/api/electron_api_app.h"
 #include "shell/browser/api/electron_api_browser_window.h"
 #include "shell/browser/api/electron_api_debugger.h"
 #include "shell/browser/api/electron_api_session.h"
@@ -103,20 +119,22 @@
 #include "shell/browser/browser.h"
 #include "shell/browser/child_web_contents_tracker.h"
 #include "shell/browser/electron_autofill_driver_factory.h"
+#include "shell/browser/electron_browser_client.h"
 #include "shell/browser/electron_browser_context.h"
 #include "shell/browser/electron_browser_main_parts.h"
 #include "shell/browser/electron_navigation_throttle.h"
 #include "shell/browser/electron_permission_manager.h"
 #include "shell/browser/file_select_helper.h"
+#include "shell/browser/file_system_access/file_system_access_web_contents_helper.h"
 #include "shell/browser/native_window.h"
 #include "shell/browser/osr/osr_render_widget_host_view.h"
 #include "shell/browser/osr/osr_web_contents_view.h"
-#include "shell/browser/preload_code_cache.h"
 #include "shell/browser/preload_script.h"
 #include "shell/browser/renderer_startup_data.h"
 #include "shell/browser/session_preferences.h"
 #include "shell/browser/ui/devtools_context_menu.h"
 #include "shell/browser/ui/drag_util.h"
+#include "shell/browser/ui/draggable_region_debugger.h"
 #include "shell/browser/ui/file_dialog.h"
 #include "shell/browser/ui/inspectable_web_contents.h"
 #include "shell/browser/ui/inspectable_web_contents_view.h"
@@ -143,11 +161,12 @@
 #include "shell/common/gin_converters/net_converter.h"
 #include "shell/common/gin_converters/optional_converter.h"
 #include "shell/common/gin_converters/osr_converter.h"
+#include "shell/common/gin_converters/serialized_value_converter.h"
 #include "shell/common/gin_converters/value_converter.h"
+#include "shell/common/gin_helper/destroyable.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/error_thrower.h"
 #include "shell/common/gin_helper/handle.h"
-#include "shell/common/gin_helper/locker.h"
 #include "shell/common/gin_helper/object_template_builder.h"
 #include "shell/common/gin_helper/promise.h"
 #include "shell/common/gin_helper/reply_channel.h"
@@ -169,11 +188,12 @@
 #include "third_party/blink/public/mojom/frame/fullscreen.mojom.h"
 #include "third_party/blink/public/mojom/messaging/transferable_message.mojom.h"
 #include "third_party/blink/public/mojom/renderer_preferences.mojom.h"
+#include "ui/accessibility/platform/ax_platform.h"
 #include "ui/base/cursor/cursor.h"
 #include "ui/base/cursor/mojom/cursor_type.mojom-shared.h"
 #include "ui/base/mojom/menu_source_type.mojom.h"
-#include "ui/display/screen.h"
 #include "ui/events/base_event_utils.h"
+#include "ui/gfx/image/image_skia.h"
 #include "ui/views/widget/widget.h"
 
 #if BUILDFLAG(IS_MAC)
@@ -200,10 +220,10 @@
 #include "chrome/browser/printing/print_view_manager_base.h"
 #include "components/printing/browser/print_composite_client.h"
 #include "components/printing/browser/print_manager_utils.h"
-#include "components/printing/browser/print_to_pdf/pdf_print_result.h"
-#include "components/printing/browser/print_to_pdf/pdf_print_utils.h"
 #include "printing/mojom/print.mojom.h"  // nogncheck
-#include "printing/page_range.h"
+#include "printing/print_job_constants.h"
+#include "shell/browser/api/electron_api_printing.h"
+#include "shell/browser/printing/print_to_pdf.h"
 #include "shell/browser/printing/print_view_manager_electron.h"
 #include "shell/browser/printing/printing_utils.h"
 
@@ -445,6 +465,18 @@ namespace {
 // Global toggle for disabling draggable regions checks.
 bool g_disable_draggable_regions = false;
 
+// Number of WebContents with caret browsing enabled.
+int g_caret_browsing_count = 0;
+
+void AdjustCaretBrowsingCount(int delta) {
+  // g_caret_browsing_count should never be negative. This shouldn't be
+  // possible, but it's cheap to ensure and log in dev.
+  DCHECK_GE(g_caret_browsing_count + delta, 0);
+  g_caret_browsing_count = std::max(0, g_caret_browsing_count + delta);
+  const bool any_enabled = g_caret_browsing_count > 0;
+  ui::AXPlatform::GetInstance().SetCaretBrowsingState(any_enabled);
+}
+
 #if BUILDFLAG(ENABLE_PRINTING)
 // Constants we use for printing.
 constexpr char kFrom[] = "from";
@@ -458,25 +490,126 @@ constexpr char kMediaSize[] = "mediaSize";
 constexpr char kDpi[] = "dpi";
 constexpr char kMarginType[] = "marginType";
 constexpr char kMargins[] = "margins";
-
-// Constants we use for printToPDF options.
-constexpr char kLandscape[] = "landscape";
-constexpr char kDisplayHeaderFooter[] = "displayHeaderFooter";
 constexpr char kPrintBackground[] = "printBackground";
-constexpr char kScale[] = "scale";
-constexpr char kPaperWidth[] = "paperWidth";
-constexpr char kPaperHeight[] = "paperHeight";
-constexpr char kMarginTop[] = "marginTop";
-constexpr char kMarginBottom[] = "marginBottom";
-constexpr char kMarginLeft[] = "marginLeft";
-constexpr char kMarginRight[] = "marginRight";
-constexpr char kHeaderTemplate[] = "headerTemplate";
-constexpr char kFooterTemplate[] = "footerTemplate";
-constexpr char kPreferCSSPageSize[] = "preferCSSPageSize";
-constexpr char kGenerateTaggedPDF[] = "generateTaggedPDF";
-constexpr char kGenerateDocumentOutline[] = "generateDocumentOutline";
+constexpr char kDuplexMode[] = "duplexMode";
+
 constexpr char kDpiHorizontal[] = "horizontal";
 constexpr char kDpiVertical[] = "vertical";
+
+struct StockMediaSize {
+  std::string_view key;  // webContents.print()'s pageSize name
+  std::string_view name;
+  int width_um;
+  int height_um;
+};
+constexpr StockMediaSize kStockMediaSizes[] = {
+    {"Letter", "NA_LETTER", 215900, 279400},
+    {"Legal", "NA_LEGAL", 215900, 355600},
+    {"Tabloid", "NA_LEDGER", 279400, 431800},
+    {"A0", "ISO_A0", 841000, 1189000},
+    {"A1", "ISO_A1", 594000, 841000},
+    {"A2", "ISO_A2", 420000, 594000},
+    {"A3", "ISO_A3", 297000, 420000},
+    {"A4", "ISO_A4", 210000, 297000},
+    {"A5", "ISO_A5", 148000, 210000},
+    {"A6", "ISO_A6", 105000, 148000},
+};
+
+// The keys are the ones the JS implementation always sent; Chromium reads the
+// sizes and imageable area (print_settings_conversion.cc).
+// A JS number as it used to arrive through base::Value: an int if it is
+// one, a double otherwise, and absent if not finite.
+void SetNumber(base::DictValue& dict, std::string_view key, double value) {
+  if (!std::isfinite(value))
+    return;
+  if (base::IsValueInRangeForNumericType<int>(value) &&
+      value == static_cast<int>(value)) {
+    dict.Set(key, static_cast<int>(value));
+  } else {
+    dict.Set(key, value);
+  }
+}
+
+base::DictValue MediaSizeDict(std::string_view name,
+                              std::string_view display_name,
+                              double width_um,
+                              double height_um) {
+  base::DictValue dict;
+  dict.Set("name", name);
+  dict.Set("custom_display_name", display_name);
+  SetNumber(dict, printing::kSettingMediaSizeHeightMicrons, height_um);
+  SetNumber(dict, printing::kSettingMediaSizeWidthMicrons, width_um);
+  dict.Set(printing::kSettingsImageableAreaLeftMicrons, 0);
+  dict.Set(printing::kSettingsImageableAreaBottomMicrons, 0);
+  SetNumber(dict, printing::kSettingsImageableAreaRightMicrons, width_um);
+  SetNumber(dict, printing::kSettingsImageableAreaTopMicrons, height_um);
+  return dict;
+}
+
+// webContents.print()'s pageSize option as a print-settings media size: one
+// of the stock names, or {width, height} in microns. nullopt (having thrown)
+// if invalid.
+std::optional<base::DictValue> MediaSizeFromPageSize(
+    v8::Isolate* isolate,
+    v8::Local<v8::Value> page_size) {
+  gin_helper::ErrorThrower thrower(isolate);
+  if (page_size->IsNull()) {
+    // What `pageSize.height` threw.
+    thrower.ThrowTypeError("Cannot read properties of null (reading 'height')");
+    return std::nullopt;
+  }
+  if (page_size->IsString()) {
+    std::string name = gin::V8ToString(isolate, page_size);
+    for (const StockMediaSize& stock : kStockMediaSizes) {
+      if (stock.key == name) {
+        return MediaSizeDict(stock.name, stock.key, stock.width_um,
+                             stock.height_um);
+      }
+    }
+  } else if (page_size->IsObject() && !page_size->IsFunction()) {
+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
+    v8::Local<v8::Object> size = page_size.As<v8::Object>();
+    // `!pageSize.height || !pageSize.width`, read in that order.
+    v8::Local<v8::Value> height_value;
+    v8::Local<v8::Value> width_value;
+    if (!size->Get(context, gin::StringToV8(isolate, "height"))
+             .ToLocal(&height_value)) {
+      return std::nullopt;
+    }
+    if (height_value->BooleanValue(isolate) &&
+        !size->Get(context, gin::StringToV8(isolate, "width"))
+             .ToLocal(&width_value)) {
+      return std::nullopt;
+    }
+    if (width_value.IsEmpty() || !width_value->BooleanValue(isolate)) {
+      thrower.ThrowError(
+          "height and width properties are required for pageSize");
+      return std::nullopt;
+    }
+    // Microns; Chromium needs at least one point (printing/units.h), i.e.
+    // more than 352 of them, or printing silently fails.
+    double height;
+    double width;
+    if (!height_value->NumberValue(context).To(&height) ||
+        !width_value->NumberValue(context).To(&width)) {
+      return std::nullopt;
+    }
+    height = std::ceil(height);
+    width = std::ceil(width);
+    if (!(height > 352 && width > 352)) {
+      thrower.ThrowRangeError(
+          "height and width properties must be minimum 352 microns.");
+      return std::nullopt;
+    }
+    return MediaSizeDict("CUSTOM", "Custom", width, height);
+  }
+  v8::Local<v8::String> as_string;
+  if (page_size->ToString(isolate->GetCurrentContext()).ToLocal(&as_string)) {
+    thrower.ThrowError(base::StrCat(
+        {"Unsupported pageSize: ", gin::V8ToString(isolate, as_string)}));
+  }
+  return std::nullopt;
+}
 #endif  // BUILDFLAG(ENABLE_PRINTING)
 
 constexpr std::string_view CursorTypeToString(
@@ -626,12 +759,14 @@ base::IDMap<WebContents*>& GetAllWebContents() {
 
 void OnCapturePageDone(gin_helper::Promise<gfx::Image> promise,
                        base::ScopedClosureRunner capture_handle,
+                       float scale_factor,
                        const content::CopyFromSurfaceResult& result) {
   auto ui_task_runner = content::GetUIThreadTaskRunner({});
   if (!ui_task_runner->RunsTasksInCurrentSequence()) {
     ui_task_runner->PostTask(
-        FROM_HERE, base::BindOnce(&OnCapturePageDone, std::move(promise),
-                                  std::move(capture_handle), result));
+        FROM_HERE,
+        base::BindOnce(&OnCapturePageDone, std::move(promise),
+                       std::move(capture_handle), scale_factor, result));
     return;
   }
 
@@ -642,8 +777,8 @@ void OnCapturePageDone(gin_helper::Promise<gfx::Image> promise,
     return;
   }
 
-  // Hack to enable transparency in captured image
-  promise.Resolve(gfx::Image::CreateFrom1xBitmap(result->bitmap));
+  promise.Resolve(gfx::Image(
+      gfx::ImageSkia::CreateFromBitmap(result->bitmap, scale_factor)));
   capture_handle.RunAndReset();
 }
 
@@ -825,6 +960,11 @@ WebContents::WebContents(v8::Isolate* isolate,
       print_task_runner_(CreatePrinterHandlerTaskRunner())
 #endif
 {
+  // A Type::kRemote WebContents returns from InitWithExtensionView() before the
+  // funnel below, so it takes its caret browsing reference here instead.
+  ReconcileCaretBrowsingCount(
+      web_contents->GetMutableRendererPrefs()->caret_browsing_enabled);
+
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
   // WebContents created by extension host will have valid ViewType set.
   extensions::mojom::ViewType view_type = extensions::GetViewType(web_contents);
@@ -836,6 +976,18 @@ WebContents::WebContents(v8::Isolate* isolate,
       web_contents);
   script_executor_ = std::make_unique<extensions::ScriptExecutor>(web_contents);
 #endif
+
+  // Nothing owns a remote api::WebContents on the JS side, so its wrapper is
+  // only kept alive by whoever happens to hold a reference to it. Some callers
+  // create it and only pick it back up later (e.g. the DevTools WebContents is
+  // created in InspectableWebContents::ShowDevTools and next looked up in
+  // DevToolsOpened once the frontend has loaded); if a GC runs in between the
+  // wrapper is collected while the C++ object is still reachable via
+  // From(), and FromOrCreate() then hands back an empty handle. Pin the
+  // wrapper for as long as the underlying content::WebContents is alive, see
+  // WebContentsDestroyed().
+  if (type_ == Type::kRemote)
+    Pin(isolate);
 
   // TODO: This works for main frames, but does not work for child frames.
   // See: https://github.com/electron/electron/issues/49256
@@ -908,6 +1060,10 @@ WebContents::WebContents(v8::Isolate* isolate,
     }
   }
 
+  // Wake lock disabling
+  bool disable_wake_locks = false;
+  options.Get(options::kDisableWakeLocks, &disable_wake_locks);
+
   // Init embedder earlier
   options.Get("embedder", &embedder_);
 
@@ -947,6 +1103,7 @@ WebContents::WebContents(v8::Isolate* isolate,
     guest_delegate_ =
         std::make_unique<WebViewGuestDelegate>(embedder_->web_contents(), this);
     params.guest_delegate = guest_delegate_.get();
+    params.enable_wake_locks = !disable_wake_locks;
 
     if (embedder_ && embedder_->IsOffScreen()) {
       auto* view = new OffScreenWebContentsView(
@@ -979,6 +1136,7 @@ WebContents::WebContents(v8::Isolate* isolate,
         base::BindRepeating(&WebContents::OnPaint, base::Unretained(this)));
     params.view = view;
     params.delegate_view = view;
+    params.enable_wake_locks = !disable_wake_locks;
 
     web_contents = content::WebContents::Create(params);
     view->SetWebContents(web_contents.get());
@@ -986,6 +1144,10 @@ WebContents::WebContents(v8::Isolate* isolate,
     content::WebContents::CreateParams params{browser_context};
     params.starting_sandbox_flags = starting_sandbox_flags;
     params.initially_hidden = !initially_shown;
+    params.enable_wake_locks = !disable_wake_locks;
+    base::AutoReset<bool> reset(
+        ElectronBrowserClient::Get()->spare_renderer_compatible(),
+        RendererProcessPreferences::From(options).CanUseSpareRenderer());
     web_contents = content::WebContents::Create(params);
   }
 
@@ -1094,13 +1256,16 @@ void WebContents::InitWithSessionAndOptions(
   // Save the preferences in C++.
   // If there's already a WebContentsPreferences object, we created it as part
   // of the webContents.setWindowOpenHandler path, so don't overwrite it.
-  if (!WebContentsPreferences::From(web_contents())) {
-    new WebContentsPreferences(web_contents(), options);
-  }
+  // WebContentsPreferences transfers ownership to WebContents in its
+  // constructor. NOLINTBEGIN(clang-analyzer-cplusplus.NewDeleteLeaks)
+  auto* web_preferences = WebContentsPreferences::From(web_contents());
+  if (!web_preferences)
+    web_preferences = new WebContentsPreferences(web_contents(), options);
+  ignore_menu_shortcuts_ = web_preferences->ShouldIgnoreMenuShortcuts();
+  // NOLINTEND(clang-analyzer-cplusplus.NewDeleteLeaks)
   // Trigger re-calculation of webkit prefs.
   web_contents()->NotifyPreferencesChanged();
 
-  WebContentsPermissionHelper::CreateForWebContents(web_contents());
   InitZoomController(web_contents(), options);
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
   extensions::ElectronExtensionWebContentsObserver::CreateForWebContents(
@@ -1159,6 +1324,16 @@ void WebContents::InitWithWebContents(
     bool is_guest) {
   browser_context_ = browser_context;
   web_contents->SetDelegate(this);
+  // As the delegate we route permission checks through this helper, so every
+  // adopted WebContents (including extension background pages) needs one.
+  WebContentsPermissionHelper::CreateForWebContents(web_contents.get());
+  FileSystemAccessWebContentsHelper::CreateForWebContents(web_contents.get());
+
+  // A <webview> guest is created with a copy of its embedder's renderer
+  // preferences, so caret browsing may already be enabled. Every path that
+  // adopts a content::WebContents funnels through here.
+  ReconcileCaretBrowsingCount(
+      web_contents->GetMutableRendererPrefs()->caret_browsing_enabled);
 
   // TODO: This works for main frames, but does not work for child frames.
   // See: https://github.com/electron/electron/issues/49256
@@ -1180,6 +1355,13 @@ void WebContents::InitWithWebContents(
 }
 
 WebContents::~WebContents() {
+  // Release this instance's contribution to the process-wide caret browsing
+  // refcount. Runs before any of the early returns below so a WebContents
+  // destroyed with caret browsing on cannot leak a count and pin the platform
+  // state on forever. Note that WebContentsDestroyed() releases it too and
+  // normally gets there first.
+  ReconcileCaretBrowsingCount(false);
+
   // A queued DevTools embedder-message IPC (e.g. "loadCompleted") can be
   // dispatched after this WebContents has begun teardown. Both delegate
   // interfaces it can call back into (DevToolsOpened()/DevToolsClosed() on the
@@ -1281,6 +1463,8 @@ void WebContents::OnDidAddMessageToConsole(
     int32_t line_no,
     const std::u16string& source_id,
     const std::optional<std::u16string>& untrusted_stack_trace) {
+  if (!console_message_observed_)
+    return;
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope handle_scope(isolate);
 
@@ -1296,10 +1480,9 @@ void WebContents::OnDidAddMessageToConsole(
   dict.Set("lineNumber", line_no);
   dict.Set("sourceId", source_id);
 
-  // TODO(samuelmaddock): Delete when deprecated arguments are fully removed.
-  dict.Set("_level", static_cast<int32_t>(level));
-
-  EmitWithoutEvent("-console-message", event_object);
+  // TODO(samuelmaddock): remove the deprecated positional arguments.
+  EmitWithoutEvent("console-message", event_object, static_cast<int32_t>(level),
+                   message, line_no, source_id);
 }
 
 void WebContents::OnCreateWindow(
@@ -1342,19 +1525,64 @@ void WebContents::WebContentsCreatedWithFullParams(
   new WebContentsPreferences(new_contents, dict);
 }
 
-bool WebContents::IsWebContentsCreationOverridden(
+bool WebContents::OnWillCreateWindow(
     content::RenderFrameHost* opener,
-    content::SiteInstance* source_site_instance,
-    content::mojom::WindowContainerType window_container_type,
-    const GURL& opener_url,
-    const content::mojom::CreateNewWindowParams& params) {
-  bool default_prevented = Emit(
-      "-will-add-new-contents", params.target_url, params.frame_name,
-      params.raw_features, params.disposition, *params.referrer, params.body);
-  // If the app prevented the default, redirect to CreateCustomWebContents,
-  // which always returns nullptr, which will result in the window open being
-  // prevented (window.open() will return null in the renderer).
-  return default_prevented;
+    const GURL& target_url,
+    const std::string& frame_name,
+    const std::string& raw_features,
+    WindowOpenDisposition disposition,
+    const content::Referrer& referrer,
+    const scoped_refptr<network::ResourceRequestBody>& body,
+    bool opener_suppressed,
+    bool* no_javascript_access) {
+  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+  v8::HandleScope handle_scope(isolate);
+
+  pending_child_web_preferences_.Reset();
+
+  // If the app prevents the default the window open is denied and
+  // window.open() will return null in the renderer.
+  if (Emit("-will-add-new-contents", target_url, frame_name, raw_features,
+           disposition, referrer, body)) {
+    pending_child_web_preferences_.Reset();
+    return false;
+  }
+
+  // A suppressed opener (e.g. noopener) already puts the child in its own
+  // BrowsingInstance and process, so its sandbox state is honoured either way.
+  if (opener_suppressed)
+    return true;
+
+  // The OS sandbox is fixed when a renderer process launches, so a child whose
+  // sandbox state differs from the opener's process must not share it.
+  std::optional<bool> opener_sandboxed =
+      ElectronBrowserClient::Get()->IsRendererProcessSandboxed(
+          opener->GetProcess()->GetID());
+  if (!opener_sandboxed) {
+    opener_sandboxed = WebContentsPreferences::ShouldUseSandbox(
+        content::WebContents::FromRenderFrameHost(opener));
+  }
+
+  gin_helper::Dictionary child_web_preferences =
+      gin::Dictionary::CreateEmpty(isolate);
+  if (!pending_child_web_preferences_.IsEmpty()) {
+    gin::ConvertFromV8(isolate, pending_child_web_preferences_.Get(isolate),
+                       &child_web_preferences);
+  }
+
+  if (WebContentsPreferences::IsSandboxed(child_web_preferences) !=
+      *opener_sandboxed) {
+    opener->AddMessageToConsole(
+        blink::mojom::ConsoleMessageLevel::kWarning,
+        "window.open(): the new window's sandbox setting differs from the "
+        "sandbox state of the opener's renderer process, so it was created in "
+        "a separate process without an opener relationship and window.open() "
+        "returned null. Set `sandbox` (or `nodeIntegration`) explicitly in "
+        "webContents.setWindowOpenHandler() to match the opener if the "
+        "windows need to share a process.");
+    *no_javascript_access = true;
+  }
+  return true;
 }
 
 void WebContents::SetNextChildWebPreferences(
@@ -1364,20 +1592,6 @@ void WebContents::SetNextChildWebPreferences(
   // Store these prefs for when Chrome calls WebContentsCreatedWithFullParams
   // with the new child contents.
   pending_child_web_preferences_.Reset(isolate, preferences.GetHandle());
-}
-
-content::WebContents* WebContents::CreateCustomWebContents(
-    content::RenderFrameHost* opener,
-    content::SiteInstance* source_site_instance,
-    bool is_new_browsing_instance,
-    const GURL& opener_url,
-    const std::string& frame_name,
-    const GURL& target_url,
-    WindowOpenDisposition disposition,
-    const blink::mojom::WindowFeatures& window_features,
-    const content::StoragePartitionConfig& partition_config,
-    content::SessionStorageNamespace* session_storage_namespace) {
-  return nullptr;
 }
 
 void WebContents::MaybeOverrideCreateParamsForNewWindow(
@@ -1406,6 +1620,10 @@ void WebContents::MaybeOverrideCreateParamsForNewWindow(
       create_params->delegate_view = view;
     }
   }
+
+  bool disable_wake_locks = false;
+  dict.Get(options::kDisableWakeLocks, &disable_wake_locks);
+  create_params->enable_wake_locks = !disable_wake_locks;
 }
 
 content::WebContents* WebContents::AddNewContents(
@@ -1452,7 +1670,12 @@ content::WebContents* WebContents::AddNewContents(
            window_features.bounds.width(), window_features.bounds.height(),
            tracker->url, tracker->frame_name, tracker->referrer,
            tracker->raw_features, tracker->body)) {
-    api_web_contents->Destroy();
+    // Destroy() may synchronously `delete this`, so drop the handle's
+    // reference first. Otherwise it is left dangling until the handle goes
+    // out of scope below.
+    auto* contents = api_web_contents.get();
+    api_web_contents.Clear();
+    contents->Destroy();
   }
 
   return nullptr;
@@ -1465,6 +1688,14 @@ content::WebContents* WebContents::OpenURLFromTab(
         navigation_handle_callback) {
   auto weak_this = GetWeakPtr();
   if (params.disposition != WindowOpenDisposition::CURRENT_TAB) {
+    // A link opened into a new window (modifier-click, middle-click,
+    // target=_blank form post routed here, ...) is a popup like window.open()
+    // and is subject to the same embedder policy; see
+    // ElectronBrowserClient::CanCreateWindow.
+    auto* source_preferences = WebContentsPreferences::From(source);
+    if (source_preferences && source_preferences->ShouldDisablePopups())
+      return nullptr;
+
     using SandboxFlags = network::mojom::WebSandboxFlags;
     SandboxFlags inherited_sandbox_flags = SandboxFlags::kNone;
     // For non-CURRENT_TAB dispositions params.frame_tree_node_id refers to
@@ -1473,7 +1704,7 @@ content::WebContents* WebContents::OpenURLFromTab(
     auto* initiator = static_cast<content::RenderFrameHostImpl*>(
         content::RenderFrameHost::FromID(params.source_render_process_id,
                                          params.source_render_frame_id));
-    if (initiator && initiator->GetParent()) {
+    if (initiator) {
       // Use the initiating document's active sandboxing flag set (its policy
       // container flags), which is what
       // content::WebContentsImpl::CreateWithOpener consults when deciding
@@ -1485,7 +1716,7 @@ content::WebContents* WebContents::OpenURLFromTab(
       if (!allow(SandboxFlags::kPopups)) {
         initiator->AddMessageToConsole(
             blink::mojom::ConsoleMessageLevel::kError,
-            "Blocked opening a new window because the iframe is sandboxed "
+            "Blocked opening a new window because the opener is sandboxed "
             "and the 'allow-popups' keyword is not set.");
         return nullptr;
       }
@@ -1497,8 +1728,31 @@ content::WebContents* WebContents::OpenURLFromTab(
         inherited_sandbox_flags = flags;
       }
     }
+    // The new window's first navigation keeps the initiator's identity
+    // (origin, frame, site instance, user gesture) instead of being re-issued
+    // as a browser-initiated load, so Sec-Fetch-Site / SameSite, external
+    // protocol attribution and navigation events describe who asked for it.
+    auto navigate = base::BindRepeating(
+        [](const content::OpenURLParams& params, content::WebContents* target) {
+          if (!target)
+            return;
+          content::NavigationController::LoadURLParams load_params(params);
+          // The initiator may live in a different session than the window the
+          // app created; a SiteInstance cannot cross browser contexts.
+          if (load_params.source_site_instance &&
+              load_params.source_site_instance->GetBrowserContext() !=
+                  target->GetBrowserContext()) {
+            load_params.source_site_instance = nullptr;
+          }
+          load_params.frame_tree_node_id = {};
+          load_params.override_user_agent =
+              content::NavigationController::UA_OVERRIDE_INHERIT;
+          target->GetController().LoadURLWithParams(load_params);
+        },
+        params);
     Emit("-new-window", params.url, "", params.disposition, "", params.referrer,
-         params.post_data, static_cast<uint32_t>(inherited_sandbox_flags));
+         params.post_data, static_cast<uint32_t>(inherited_sandbox_flags),
+         navigate);
     return nullptr;
   }
 
@@ -1537,9 +1791,14 @@ void WebContents::BeforeUnloadFired(content::WebContents* tab,
                                     bool* proceed_to_fire_unload) {
   // Note that Chromium does not emit this for navigations.
 
-  // Emit returns true if preventDefault() was called, so !Emit will be true if
-  // the event should proceed.
-  *proceed_to_fire_unload = !Emit("-before-unload-fired", proceed);
+  // Only the types a user may be looking at get to veto the unload; every
+  // other type unloads regardless of |proceed|. The event is internal (specs
+  // watch it); preventing it vetoes too.
+  const bool interactive = type_ == Type::kBrowserWindow ||
+                           type_ == Type::kOffScreen ||
+                           type_ == Type::kBrowserView;
+  const bool prevented = Emit("-before-unload-fired", proceed);
+  *proceed_to_fire_unload = !prevented && (proceed || !interactive);
 }
 
 void WebContents::SetContentsBounds(content::WebContents* source,
@@ -1579,9 +1838,16 @@ bool WebContents::HandleKeyboardEvent(
   if (type_ == Type::kWebView && embedder_) {
     // Send the unhandled keyboard events back to the embedder.
     return embedder_->HandleKeyboardEvent(source, event);
-  } else {
-    return PlatformHandleKeyboardEvent(source, event);
   }
+
+  // Let DevTools consume shortcuts it has registered for (e.g. F8 to pause)
+  // even though the inspected page has focus.
+  if (inspectable_web_contents_ &&
+      inspectable_web_contents_->ForwardKeyboardEvent(event)) {
+    return true;
+  }
+
+  return PlatformHandleKeyboardEvent(source, event);
 }
 
 #if !BUILDFLAG(IS_MAC)
@@ -1591,9 +1857,7 @@ bool WebContents::HandleKeyboardEvent(
 bool WebContents::PlatformHandleKeyboardEvent(
     content::WebContents* source,
     const input::NativeWebKeyboardEvent& event) {
-  // Check if the webContents has preferences and to ignore shortcuts
-  auto* web_preferences = WebContentsPreferences::From(source);
-  if (web_preferences && web_preferences->ShouldIgnoreMenuShortcuts())
+  if (ShouldIgnoreMenuShortcutsFor(source))
     return false;
 
   // Let the NativeWindow handle other parts.
@@ -1605,12 +1869,6 @@ bool WebContents::PlatformHandleKeyboardEvent(
   return false;
 }
 #endif
-
-bool WebContents::PreHandleMouseEvent(content::WebContents* source,
-                                      const blink::WebMouseEvent& event) {
-  // |true| means that the event should be prevented.
-  return Emit("before-mouse-event", event);
-}
 
 content::KeyboardEventProcessingResult WebContents::PreHandleKeyboardEvent(
     content::WebContents* source,
@@ -1737,6 +1995,18 @@ void WebContents::RendererUnresponsive(
     content::WebContents* source,
     content::RenderWidgetHost* render_widget_host,
     base::RepeatingClosure hang_monitor_restarter) {
+  // The hang monitor's timer keeps counting through system sleep on Windows,
+  // so a timeout that lands while suspended or right after waking says nothing
+  // about the renderer; give it a full delay from the wake instead.
+  const base::TimeTicks last_resume =
+      base::PowerMonitor::GetInstance()->GetLastSystemResumeTime();
+  if (last_resume.is_max() ||
+      (!last_resume.is_null() &&
+       base::TimeTicks::Now() - last_resume < input::kHungRendererDelay)) {
+    hang_monitor_restarter.Run();
+    return;
+  }
+
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope handle_scope(isolate);
   gin_helper::internal::Event* event =
@@ -1754,9 +2024,26 @@ void WebContents::RendererUnresponsive(
 
   auto* rwh_impl =
       static_cast<content::RenderWidgetHostImpl*>(render_widget_host);
-  dict.Set("rendererInitialized", rwh_impl->renderer_initialized());
+  const bool renderer_initialized = rwh_impl->renderer_initialized();
+  dict.Set("rendererInitialized", renderer_initialized);
 
-  EmitWithoutEvent("-unresponsive", event_object);
+  if (!should_ignore && visible && renderer_initialized)
+    EmitWithoutEvent("unresponsive", event_object);
+}
+
+bool WebContents::SaveFrame(const GURL& url,
+                            const content::Referrer& referrer,
+                            content::RenderFrameHost* rfh) {
+  // Downloads read file: URLs from disk directly; save asar entries from an
+  // extracted copy.
+  GURL extracted_url;
+  std::u16string file_name;
+  if (!asar::GetExtractedFileURL(url, &extracted_url, &file_name))
+    return false;
+  web_contents()->SaveFrameWithHeaders(extracted_url, referrer, std::string(),
+                                       file_name, rfh,
+                                       /*is_subresource=*/false);
+  return true;
 }
 
 void WebContents::RendererResponsive(
@@ -1998,12 +2285,36 @@ void WebContents::HandleNewRenderFrame(
 
   auto* rwh_impl =
       static_cast<content::RenderWidgetHostImpl*>(rwhv->GetRenderWidgetHost());
-  if (rwh_impl)
+  if (rwh_impl) {
     rwh_impl->disable_hidden_ = !background_throttling_;
+    if (!mouse_event_callback_) {
+      mouse_event_callback_ = base::BindRepeating(
+          [](base::WeakPtr<WebContents> self, const blink::WebMouseEvent& e) {
+            return self && self->OnMouseEvent(e);
+          },
+          weak_factory_.GetWeakPtr());
+    }
+    // Frames in one local root share a widget, so re-registering is expected.
+    rwh_impl->RemoveMouseEventCallback(mouse_event_callback_);
+    rwh_impl->AddMouseEventCallback(mouse_event_callback_);
+  }
 
   auto* web_frame = WebFrameMain::FromRenderFrameHost(render_frame_host);
   if (web_frame)
     web_frame->MaybeSetupMojoConnection();
+
+  // A Node.js renderer used to fetch its preload list with a sync IPC, which
+  // also worked for a script context created on the frame's initial empty
+  // document (first navigation still pending or cancelled, then e.g.
+  // webFrameMain.executeJavaScript()). Push the list at frame creation so
+  // that case still sees it; the payload is only the paths, so the extra
+  // message per frame is cheap. ReadyToCommitNavigation refreshes it.
+  if (!renderer_startup_data::IsFrameInSandboxedRenderer(render_frame_host)) {
+    const bool allow_subframes =
+        web_preferences && web_preferences->AllowsNodeIntegrationInSubFrames();
+    if (!render_frame_host->GetParent() || allow_subframes)
+      SendRendererStartupData(render_frame_host);
+  }
 }
 
 void WebContents::OnBackgroundColorChanged() {
@@ -2124,12 +2435,52 @@ void WebContents::PrimaryMainFrameRenderProcessGone(
 
 void WebContents::EmitRenderProcessGone(base::TerminationStatus status,
                                         int exit_code) {
-  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+  v8::Isolate* const isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope handle_scope(isolate);
   auto details = gin_helper::Dictionary::CreateEmpty(isolate);
   details.Set("reason", status);
   details.Set("exitCode", exit_code);
-  Emit("render-process-gone", details);
+
+  v8::Local<v8::Object> wrapper;
+  v8::Local<v8::Object> app;
+  if (!GetWrapper(isolate).ToLocal(&wrapper) ||
+      !App::Get()->GetWrapper(isolate).ToLocal(&app)) {
+    return;
+  }
+  v8::Local<v8::Object> event = gin_helper::internal::Event::New(isolate)
+                                    ->GetWrapper(isolate)
+                                    .ToLocalChecked();
+  // app first: it always was the WebContents' first listener. One callback
+  // scope around both emits so that ticks and microtasks run once, after
+  // both, as when one emit nested the other. The WebContents' own listeners
+  // run off the saved wrapper even if an app listener destroyed it, as the
+  // rest of an emit in progress did; nothing of |this| is used from here.
+  node::CallbackScope callback_scope{isolate, wrapper,
+                                     node::async_context{0, 0}};
+  gin_helper::EmitEvent(isolate, app, "render-process-gone", event, wrapper,
+                        details);
+  if (base::Environment::Create()->HasVar("ELECTRON_ENABLE_LOGGING") ||
+      base::CommandLine::ForCurrentProcess()->HasSwitch("enable-logging")) {
+    // A hint for people debugging renderer crashes.
+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
+    v8::Local<v8::Value> console;
+    if (context->Global()
+            ->Get(context, gin::StringToV8(isolate, "console"))
+            .ToLocal(&console) &&
+        console->IsObject()) {
+      gin_helper::CallMethod(
+          isolate, console.As<v8::Object>(), "info",
+          base::StrCat(
+              {"Renderer process ",
+               gin::V8ToString(isolate, gin::ConvertToV8(isolate, status)),
+               " - see "
+               "https://www.electronjs.org/docs/tutorial/"
+               "application-debugging for potential debugging "
+               "information."}));
+    }
+  }
+  gin_helper::EmitEvent(isolate, wrapper, "render-process-gone", event,
+                        details);
 }
 
 void WebContents::MediaStartedPlaying(const MediaPlayerInfo& video_type,
@@ -2190,8 +2541,10 @@ void WebContents::DidFinishLoad(content::RenderFrameHost* render_frame_host,
   // ⚠️WARNING!⚠️
   // Emit() triggers JS which can call destroy() on |this|. It's not safe to
   // assume that |this| points to valid memory at this point.
-  if (is_main_frame && weak_this && web_contents())
+  if (is_main_frame && weak_this && web_contents()) {
+    load_url_promises_.DidFinishLoad();
     Emit("did-finish-load");
+  }
 }
 
 void WebContents::DidFailLoad(content::RenderFrameHost* render_frame_host,
@@ -2211,8 +2564,25 @@ void WebContents::DidFailLoad(content::RenderFrameHost* render_frame_host,
   int32_t frame_process_id =
       render_frame_host->GetProcess()->GetID().GetUnsafeValue();
   int frame_routing_id = render_frame_host->GetRoutingID();
-  Emit("did-fail-load", error_code, "", url, is_main_frame, frame_process_id,
-       frame_routing_id);
+  EmitDidFailLoad(error_code, "", url, is_main_frame, frame_process_id,
+                  frame_routing_id);
+}
+
+void WebContents::EmitDidFailLoad(int error_code,
+                                  std::string_view error_description,
+                                  const GURL& url,
+                                  bool is_main_frame,
+                                  int frame_process_id,
+                                  int frame_routing_id) {
+  const std::string& spec = url.possibly_invalid_spec();
+  load_url_promises_.DidFailLoad(error_code, error_description, spec,
+                                 is_main_frame);
+  if (frame_process_id == -1) {
+    Emit("did-fail-load", error_code, error_description, spec, is_main_frame);
+  } else {
+    Emit("did-fail-load", error_code, error_description, url, is_main_frame,
+         frame_process_id, frame_routing_id);
+  }
 }
 
 void WebContents::DidStartLoading() {
@@ -2224,7 +2594,27 @@ void WebContents::DidStopLoading() {
   if (web_preferences && web_preferences->ShouldUsePreferredSizeMode())
     web_contents()->GetRenderViewHost()->EnablePreferredSizeMode();
 
+  // Loading also stops when a renderer dies mid-load, reported from inside
+  // RenderFrameHostImpl::RenderProcessGone. A navigation started by the app
+  // while handling this event (or the loadURL() rejection it causes) would
+  // replace the frame host content is still tearing down, so navigations are
+  // posted until the emit returns; see PostNavigationInRendererTeardown().
+  const bool in_renderer_teardown =
+      std::exchange(navigation_discarded_by_process_gone_, false) ||
+      !web_contents()
+           ->GetPrimaryMainFrame()
+           ->GetProcess()
+           ->IsInitializedAndNotDead();
+  base::AutoReset<bool> defer(&in_renderer_teardown_, in_renderer_teardown);
+  load_url_promises_.DidStopLoading();
   Emit("did-stop-loading");
+}
+
+bool WebContents::PostNavigationInRendererTeardown(base::OnceClosure navigate) {
+  if (!in_renderer_teardown_)
+    return false;
+  content::GetUIThreadTaskRunner({})->PostTask(FROM_HERE, std::move(navigate));
+  return true;
 }
 
 bool WebContents::EmitNavigationEvent(
@@ -2272,18 +2662,56 @@ bool WebContents::EmitNavigationEvent(
 void WebContents::OnFirstNonEmptyLayout(
     content::RenderFrameHost* render_frame_host) {
   if (render_frame_host == web_contents()->GetPrimaryMainFrame()) {
+    v8::Isolate* const isolate = JavascriptEnvironment::GetIsolate();
+    v8::HandleScope handle_scope(isolate);
+    v8::Local<v8::Object> wrapper;
+    if (!GetWrapper(isolate).ToLocal(&wrapper))
+      return;
+    // One callback scope around both emits: the window's listeners run before
+    // microtasks queued by the WebContents', as when it was a nextTick.
+    node::CallbackScope callback_scope{isolate, wrapper,
+                                       node::async_context{0, 0}};
+    // The owner as it is before any listener runs, as the first listener saw.
+    v8::Local<v8::Value> owner =
+        owner_window() ? BrowserWindow::From(isolate, owner_window())
+                       : v8::Local<v8::Value>(v8::Null(isolate));
+    const bool notify_owner =
+        owner->IsObject() &&
+        !gin_helper::Destroyable::IsDestroyed(owner.As<v8::Object>());
     Emit("ready-to-show");
+    // Then the window showing it, as BrowserWindow documents.
+    if (notify_owner)
+      gin_helper::EmitEvent(isolate, owner.As<v8::Object>(), "ready-to-show");
   }
 }
 
 void WebContents::DraggableRegionsChanged(
     const std::vector<blink::mojom::DraggableRegionPtr>& regions,
     content::WebContents* contents) {
+  if (!draggable_region_debugger_ && DraggableRegionDebugger::IsEnabled()) {
+    views::View* contents_view = nullptr;
+    if (inspectable_web_contents_ && !is_guest() && !IsOffScreen())
+      contents_view = inspectable_web_contents_->GetView()->GetContentsView();
+    draggable_region_debugger_ =
+        std::make_unique<DraggableRegionDebugger>(ID(), contents_view);
+  }
+
   if (owner_window() && owner_window()->has_frame()) {
+    if (draggable_region_debugger_) {
+      draggable_region_debugger_->OnRegionsChanged(regions, nullptr,
+                                                   base::TimeDelta());
+    }
     return;
   }
 
+  std::optional<base::ElapsedTimer> timer;
+  if (draggable_region_debugger_)
+    timer.emplace();
   draggable_region_.emplace(DraggableRegionsToSkRegion(regions));
+  if (draggable_region_debugger_) {
+    draggable_region_debugger_->OnRegionsChanged(regions, &*draggable_region_,
+                                                 timer->Elapsed());
+  }
 }
 
 #if BUILDFLAG(ENABLE_PRINTING)
@@ -2308,6 +2736,9 @@ SkRegion* WebContents::draggable_region() {
 void WebContents::DidStartNavigation(
     content::NavigationHandle* navigation_handle) {
   base::AutoReset<bool> resetter(&is_safe_to_delete_, false);
+  load_url_promises_.DidStartNavigation(
+      navigation_handle->GetURL().possibly_invalid_spec(),
+      navigation_handle->IsSameDocument(), navigation_handle->IsInMainFrame());
   EmitNavigationEvent("did-start-navigation", navigation_handle);
 }
 
@@ -2317,36 +2748,43 @@ void WebContents::DidRedirectNavigation(
   EmitNavigationEvent("did-redirect-navigation", navigation_handle);
 }
 
-// Pushes preload contents + process.env + helperExecPath over an associated
-// channel ordered before CommitNavigation, so the renderer never has to ask.
+// Pushes the preload list (plus, for sandboxed frames, preload contents,
+// process.env and helperExecPath) over an associated channel ordered before
+// CommitNavigation, so the renderer never has to ask.
 void WebContents::MaybeSendRendererStartupData(
     content::NavigationHandle* navigation_handle) {
-  if (!WebContentsPreferences::ShouldUseSandbox(web_contents()))
-    return;
   // May be null for a WebContents that never went through a
   // BrowserWindow/webContents constructor (extension pages, devtools); such a
   // WebContents has no per-WC preload but still gets session preloads + env.
   auto* web_prefs = WebContentsPreferences::From(web_contents());
 
   // Match RendererClientBase::ShouldLoadPreload() — only push for documents
-  // that will actually compile the sandbox bundle.
-  const GURL& url = navigation_handle->GetURL();
-  bool main_frame = navigation_handle->IsInMainFrame();
-  bool allow_subframes =
-      web_prefs && web_prefs->AllowsNodeIntegrationInSubFrames();
-  bool is_devtools_like =
-      url.SchemeIs("devtools") || url.SchemeIs("chrome-extension");
-  if (!main_frame && !allow_subframes && !is_devtools_like)
-    return;
-
+  // that will actually run preloads / create a Node.js environment.
   content::RenderFrameHost* rfh = navigation_handle->GetRenderFrameHost();
   if (!rfh || !rfh->IsRenderFrameLive())
     return;
 
-  // Build the ordered preload list: session-registered preloads of type
-  // 'frame' first (in registration order), then the per-WebContents
-  // webPreferences.preload last — same order as the legacy
-  // BROWSER_SANDBOX_LOAD handler's getPreloadScriptsFromEvent().
+  const GURL& url = navigation_handle->GetURL();
+  bool main_frame = navigation_handle->IsInMainFrame();
+  bool allow_subframes =
+      web_prefs && web_prefs->AllowsNodeIntegrationInSubFrames();
+  // DevTools itself, or an extension document hosted inside the DevTools
+  // front-end (a devtools_page / panel). An extension frame embedded in an
+  // ordinary page is treated like any other subframe.
+  bool is_devtools_like =
+      url.SchemeIs("devtools") ||
+      (url.SchemeIs("chrome-extension") && !main_frame &&
+       rfh->GetMainFrame()->GetLastCommittedURL().SchemeIs("devtools"));
+  if (!main_frame && !allow_subframes && !is_devtools_like)
+    return;
+
+  SendRendererStartupData(rfh);
+}
+
+void WebContents::SendRendererStartupData(content::RenderFrameHost* rfh) {
+  if (!rfh || !rfh->IsRenderFrameLive())
+    return;
+
   mojom::RendererStartupDataPtr data;
   {
     // We're on the UI thread. The asar is mmap'd and offset-indexed so warm
@@ -2354,38 +2792,17 @@ void WebContents::MaybeSendRendererStartupData(
     // parked waiting on us here — we haven't sent CommitNavigation yet — so
     // unlike the old sync IPC handler this can't amplify under contention.
     ScopedAllowBlockingForElectron allow_blocking;
-    data = renderer_startup_data::Build(rfh->GetBrowserContext(),
-                                        PreloadScript::ScriptType::kWebFrame);
-    std::optional<base::FilePath> preload;
-    if (web_prefs)
-      preload = web_prefs->GetPreloadPath();
-    if (preload && preload->IsAbsolute()) {
-      auto ps = mojom::PreloadScriptData::New();
-      ps->id = preload_code_cache::IdForWebPreferencesPreload(*preload);
-      ps->file_path = preload->AsUTF8Unsafe();
-      std::string contents;
-      if (asar::ReadFileToString(*preload, &contents)) {
-        ps->contents.assign(contents.begin(), contents.end());
-        std::vector<uint8_t> cache =
-            preload_code_cache::Get(ps->id, ps->contents);
-        if (!cache.empty())
-          ps->code_cache = std::move(cache);
-      } else {
-        ps->contents.clear();
-        ps->error =
-            "ENOENT: no such file or directory, open '" + ps->file_path + "'";
-      }
-      data->preload_scripts.push_back(std::move(ps));
-    }
+    data = renderer_startup_data::BuildForFrame(rfh);
   }
 
   // GetRemoteAssociatedInterfaces() routes over the same channel as
-  // content.mojom.Frame (the navigation channel), so this message is ordered
-  // before the CommitNavigation that the browser sends right after
-  // ReadyToCommitNavigation returns. The renderer's ElectronApiServiceImpl —
-  // created in RenderFrameCreated, before any navigation — will have cached it
-  // by the time DidCreateScriptContext fires.
-  mojo::AssociatedRemote<mojom::ElectronFrameStartup> frame_startup;
+  // content.mojom.Frame (the navigation channel), so a push from
+  // ReadyToCommitNavigation is ordered before the CommitNavigation that the
+  // browser sends right after it returns, and a push from HandleNewRenderFrame
+  // is ordered before anything else on the frame. The renderer's
+  // ElectronApiServiceImpl — created in RenderFrameCreated, before any
+  // navigation — will have cached it by the time DidCreateScriptContext fires.
+  mojo::AssociatedRemote<mojom::ElectronFrame> frame_startup;
   rfh->GetRemoteAssociatedInterfaces()->GetInterface(&frame_startup);
   frame_startup->SetStartupData(std::move(data));
 }
@@ -2421,6 +2838,13 @@ void WebContents::DidFinishNavigation(
     owner_window_->NotifyLayoutWindowControlsOverlay();
   }
 
+  if (navigation_handle->GetNavigationDiscardReason() ==
+      content::NavigationDiscardReason::kRenderProcessGone) {
+    // The frame whose process died may not be the primary main frame (a
+    // speculative frame host, for one), so tell DidStopLoading explicitly.
+    navigation_discarded_by_process_gone_ = true;
+  }
+
   if (!navigation_handle->HasCommitted())
     return;
 
@@ -2438,6 +2862,7 @@ void WebContents::DidFinishNavigation(
     auto url = navigation_handle->GetURL();
     bool is_same_document = navigation_handle->IsSameDocument();
     if (is_same_document) {
+      load_url_promises_.DidNavigateInPage();
       Emit("did-navigate-in-page", url, is_main_frame, frame_process_id,
            frame_routing_id);
     } else {
@@ -2457,18 +2882,20 @@ void WebContents::DidFinishNavigation(
           zc->ProcessNavigationZoom(navigation_handle);
         Emit("did-navigate", url, http_response_code, http_status_text);
       }
-
-      content::NavigationEntry* entry = navigation_handle->GetNavigationEntry();
-
-      // This check is needed due to an issue in Chromium
-      // Upstream is open to patching:
-      // https://bugs.chromium.org/p/chromium/issues/detail?id=1178663
-      // If a history entry has been made and the forward/back call has been
-      // made, proceed with setting the new title
-      if (entry &&
-          (entry->GetTransitionType() & ui::PAGE_TRANSITION_FORWARD_BACK))
-        WebContents::TitleWasSet(entry);
     }
+
+    content::NavigationEntry* entry = navigation_handle->GetNavigationEntry();
+
+    // This check is needed due to an issue in Chromium
+    // Upstream is open to patching:
+    // https://bugs.chromium.org/p/chromium/issues/detail?id=1178663
+    // If a history entry has been made and the forward/back call has been
+    // made, proceed with setting the new title
+    if (is_main_frame && entry &&
+        (navigation_handle->GetPageTransition() &
+         ui::PAGE_TRANSITION_FORWARD_BACK))
+      NotifyPageTitleUpdated(entry, is_same_document);
+
     if (is_guest())
       Emit("load-commit", url, is_main_frame);
   } else {
@@ -2484,13 +2911,15 @@ void WebContents::DidFinishNavigation(
           base::StrCat({"Failed to load URL: ", url.possibly_invalid_spec(),
                         " with error: ", description}),
           "electron");
-      Emit("did-fail-load", code, description, url, is_main_frame,
-           frame_process_id, frame_routing_id);
+      EmitDidFailLoad(code, description, url, is_main_frame, frame_process_id,
+                      frame_routing_id);
     }
   }
 }
 
-void WebContents::TitleWasSet(content::NavigationEntry* entry) {
+void WebContents::NotifyPageTitleUpdated(
+    content::NavigationEntry* entry,
+    bool from_same_document_history_navigation) {
   std::u16string final_title;
   bool explicit_set = true;
   if (entry) {
@@ -2506,8 +2935,13 @@ void WebContents::TitleWasSet(content::NavigationEntry* entry) {
     final_title = web_contents()->GetTitle();
   }
   observers_.Notify(&ExtendedWebContentsObserver::OnPageTitleUpdated,
-                    final_title, explicit_set);
+                    final_title, explicit_set,
+                    from_same_document_history_navigation);
   Emit("page-title-updated", final_title, explicit_set);
+}
+
+void WebContents::TitleWasSet(content::NavigationEntry* entry) {
+  NotifyPageTitleUpdated(entry, false);
 }
 
 void WebContents::DidUpdateFaviconURL(
@@ -2530,7 +2964,18 @@ void WebContents::DidUpdateFaviconURL(
 }
 
 void WebContents::DevToolsReloadPage() {
-  Emit("devtools-reload-page");
+  auto weak_this = GetWeakPtr();
+  v8::Isolate* const isolate = JavascriptEnvironment::GetIsolate();
+  v8::HandleScope handle_scope(isolate);
+  v8::Local<v8::Object> wrapper;
+  if (!GetWrapper(isolate).ToLocal(&wrapper))
+    return;
+  // reload() used to run from the event's first listener: same scope.
+  node::CallbackScope callback_scope{isolate, wrapper,
+                                     node::async_context{0, 0}};
+  Reload();
+  if (weak_this && web_contents())
+    Emit("devtools-reload-page");
 }
 
 void WebContents::DevToolsFocused() {
@@ -2621,7 +3066,22 @@ content::WebContents* WebContents::GetDevToolsWebContents() const {
   return inspectable_web_contents_->GetDevToolsWebContents();
 }
 
+content::WebContents* WebContents::GetOpenDevToolsWebContents() const {
+  return devtools_web_contents_.IsEmpty() ? nullptr : GetDevToolsWebContents();
+}
+
 void WebContents::WebContentsDestroyed() {
+  // Drop this instance's contribution to the process-wide caret browsing count.
+  ReconcileCaretBrowsingCount(false);
+
+  // For a content::WebContents we do not own (guest, background page), frames
+  // outlive us but no longer get lifecycle notifications; dispose them now.
+  if (web_contents())
+    WebFrameMain::DestroyAllForWebContents(web_contents());
+
+  // The underlying content::WebContents is gone, let the wrapper be collected.
+  Unpin();
+
   // Clear the pointer stored in wrapper.
   if (GetAllWebContents().Lookup(id_))
     GetAllWebContents().Remove(id_);
@@ -2638,6 +3098,7 @@ void WebContents::WebContentsDestroyed() {
     guest_delegate_->WillDestroy();
 
   Observe(nullptr);
+  load_url_promises_.DidStopLoading();
   Emit("destroyed");
 }
 
@@ -2675,7 +3136,29 @@ void WebContents::SetBackgroundThrottling(bool allowed) {
   web_contents()->GetRenderViewHost()->SetSchedulerThrottling(allowed);
 
   if (rwh_impl->IsHidden()) {
-    rwh_impl->WasShown({});
+    // Un-hide through the view rather than calling
+    // RenderWidgetHostImpl::WasShown() directly, so that the platform view
+    // (and on macOS the BrowserCompositorMac / DelegatedFrameHost) also
+    // learns the widget is now producing frames. Bypassing the view leaves the
+    // DelegatedFrameHost embedding a stale LocalSurfaceId that the renderer no
+    // longer submits to; when the window is later shown, the "already shown"
+    // host makes the view skip its show handling and the surface is never
+    // embedded, so the window stays blank until a resize allocates a new id.
+    // kHiddenButPainting is the same state content uses for a hidden but
+    // captured WebContents: the widget renders, the page stays hidden.
+    //
+    // Guest (<webview>) main frames are child-frame views: their surface is
+    // embedded by the embedder's renderer, so there is no browser-side
+    // compositor state to keep in sync, and their ShowWithVisibility()
+    // refuses to show a frame the embedder has hidden (display: none). Keep
+    // the direct WasShown() for them so behavior there is unchanged.
+    auto* rwhv_base = static_cast<content::RenderWidgetHostViewBase*>(rwhv);
+    if (rwhv_base->IsRenderWidgetHostViewChildFrame()) {
+      rwh_impl->WasShown({});
+    } else {
+      rwhv_base->ShowWithVisibility(
+          content::PageVisibilityState::kHiddenButPainting);
+    }
   }
 }
 
@@ -2724,13 +3207,18 @@ GURL WebContents::GetURL() const {
   return web_contents()->GetLastCommittedURL();
 }
 
-void WebContents::LoadURL(const GURL& url,
-                          const gin_helper::Dictionary& options) {
+v8::Local<v8::Promise> WebContents::LoadURL(gin::Arguments* args,
+                                            const std::string& url_string) {
+  v8::Local<v8::Promise> promise =
+      load_url_promises_.Add(args->isolate(), url_string);
+  auto options = gin_helper::Dictionary::CreateEmpty(args->isolate());
+  args->GetNext(&options);
+
+  GURL url(url_string);
   if (!url.is_valid() || url.spec().size() > url::kMaxURLChars) {
-    Emit("did-fail-load", static_cast<int>(net::ERR_INVALID_URL),
-         net::ErrorToShortString(net::ERR_INVALID_URL),
-         url.possibly_invalid_spec(), true);
-    return;
+    EmitDidFailLoad(net::ERR_INVALID_URL,
+                    net::ErrorToShortString(net::ERR_INVALID_URL), url, true);
+    return promise;
   }
 
   content::NavigationController::LoadURLParams params(url);
@@ -2767,9 +3255,6 @@ void WebContents::LoadURL(const GURL& url,
     params.reload_type = content::ReloadType::BYPASSING_CACHE;
   }
 
-  // Calling LoadURLWithParams() can trigger JS which destroys |this|.
-  auto weak_this = GetWeakPtr();
-
   params.transition_type = ui::PageTransitionFromInt(
       ui::PAGE_TRANSITION_TYPED | ui::PAGE_TRANSITION_FROM_ADDRESS_BAR);
   params.override_user_agent = content::NavigationController::UA_OVERRIDE_TRUE;
@@ -2780,14 +3265,28 @@ void WebContents::LoadURL(const GURL& url,
   auto& ctrl_impl = static_cast<content::NavigationControllerImpl&>(
       web_contents()->GetController());
   if (!is_safe_to_delete_ || ctrl_impl.in_navigate_to_pending_entry()) {
-    Emit("did-fail-load", static_cast<int>(net::ERR_FAILED),
-         net::ErrorToShortString(net::ERR_FAILED), url.possibly_invalid_spec(),
-         true);
-    return;
+    EmitDidFailLoad(net::ERR_FAILED, net::ErrorToShortString(net::ERR_FAILED),
+                    url, true);
+    return promise;
   }
 
+  if (in_renderer_teardown_) {
+    content::GetUIThreadTaskRunner({})->PostTask(
+        FROM_HERE, base::BindOnce(&WebContents::LoadURLWithParams, GetWeakPtr(),
+                                  std::move(params)));
+    return promise;
+  }
+  LoadURLWithParams(std::move(params));
+  return promise;
+}
+
+void WebContents::LoadURLWithParams(
+    content::NavigationController::LoadURLParams params) {
   if (web_contents()->NeedToFireBeforeUnloadOrUnloadEvents())
-    pending_unload_url_ = url;
+    pending_unload_url_ = params.url;
+
+  // Calling LoadURLWithParams() can trigger JS which destroys |this|.
+  auto weak_this = GetWeakPtr();
 
   // Discard non-committed entries to ensure we don't re-use a pending entry.
   web_contents()->GetController().DiscardNonCommittedEntries();
@@ -2811,11 +3310,17 @@ void WebContents::LoadURL(const GURL& url,
 // result in them succeeding, but reposting which although more correct could be
 // considering a breaking change.
 void WebContents::Reload() {
+  if (PostNavigationInRendererTeardown(
+          base::BindOnce(&WebContents::Reload, GetWeakPtr())))
+    return;
   web_contents()->GetController().Reload(content::ReloadType::NORMAL,
                                          /* check_for_repost */ true);
 }
 
 void WebContents::ReloadIgnoringCache() {
+  if (PostNavigationInRendererTeardown(
+          base::BindOnce(&WebContents::ReloadIgnoringCache, GetWeakPtr())))
+    return;
   web_contents()->GetController().Reload(content::ReloadType::BYPASSING_CACHE,
                                          /* check_for_repost */ true);
 }
@@ -2830,9 +3335,18 @@ void WebContents::DownloadURL(const GURL& url, gin::Arguments* args) {
     }
   }
 
+  GURL download_url = url;
+  std::u16string asar_file_name;
+  const bool from_asar =
+      asar::GetExtractedFileURL(url, &download_url, &asar_file_name);
   std::unique_ptr<download::DownloadUrlParameters> download_params(
       content::DownloadRequestUtils::CreateDownloadForWebContentsMainFrame(
-          web_contents(), url, MISSING_TRAFFIC_ANNOTATION));
+          web_contents(), download_url, MISSING_TRAFFIC_ANNOTATION));
+  if (from_asar) {
+    // The suggested name is dropped when a page initiator is set.
+    download_params->set_suggested_name(asar_file_name);
+    download_params->set_initiator(std::nullopt);
+  }
   for (const auto& [name, value] : headers) {
     if (base::ToLowerASCII(name) ==
         base::ToLowerASCII(net::HttpRequestHeaders::kReferer)) {
@@ -2874,6 +3388,9 @@ bool WebContents::CanGoBack() const {
 }
 
 void WebContents::GoBack() {
+  if (PostNavigationInRendererTeardown(
+          base::BindOnce(&WebContents::GoBack, GetWeakPtr())))
+    return;
   if (CanGoBack())
     web_contents()->GetController().GoBack();
 }
@@ -2883,6 +3400,9 @@ bool WebContents::CanGoForward() const {
 }
 
 void WebContents::GoForward() {
+  if (PostNavigationInRendererTeardown(
+          base::BindOnce(&WebContents::GoForward, GetWeakPtr())))
+    return;
   if (CanGoForward())
     web_contents()->GetController().GoForward();
 }
@@ -2892,6 +3412,9 @@ bool WebContents::CanGoToOffset(int offset) const {
 }
 
 void WebContents::GoToOffset(int offset) {
+  if (PostNavigationInRendererTeardown(
+          base::BindOnce(&WebContents::GoToOffset, GetWeakPtr(), offset)))
+    return;
   if (CanGoToOffset(offset))
     web_contents()->GetController().GoToOffset(offset);
 }
@@ -2901,6 +3424,9 @@ bool WebContents::CanGoToIndex(int index) const {
 }
 
 void WebContents::GoToIndex(int index) {
+  if (PostNavigationInRendererTeardown(
+          base::BindOnce(&WebContents::GoToIndex, GetWeakPtr(), index)))
+    return;
   if (CanGoToIndex(index))
     web_contents()->GetController().GoToIndex(index);
 }
@@ -2939,11 +3465,18 @@ std::vector<content::NavigationEntry*> WebContents::GetHistory() const {
   return history;
 }
 
-void WebContents::RestoreHistory(
+v8::Local<v8::Promise> WebContents::RestoreHistory(
     v8::Isolate* isolate,
     gin_helper::ErrorThrower thrower,
     int index,
     const std::vector<v8::Local<v8::Value>>& entries) {
+  // What loadURL() would return for the entry being restored.
+  std::string url;
+  if (index >= 0 && static_cast<size_t>(index) < entries.size() &&
+      entries[index]->IsObject()) {
+    gin::Dictionary(isolate, entries[index].As<v8::Object>()).Get("url", &url);
+  }
+  v8::Local<v8::Promise> promise = load_url_promises_.Add(isolate, url);
   if (!web_contents()
            ->GetController()
            .GetLastCommittedEntry()
@@ -2951,7 +3484,7 @@ void WebContents::RestoreHistory(
     thrower.ThrowError(
         "Cannot restore history on webContents that have previously loaded "
         "a page.");
-    return;
+    return promise;
   }
 
   auto navigation_entries =
@@ -2971,7 +3504,7 @@ void WebContents::RestoreHistory(
           "Failed to restore navigation history: Invalid navigation entry at "
           "index " +
           base::NumberToString(index) + ".");
-      return;
+      return promise;
     }
 
     nav_entry->SetIsOverridingUserAgent(
@@ -2985,6 +3518,7 @@ void WebContents::RestoreHistory(
         index, content::RestoreType::kRestored, &navigation_entries);
     web_contents()->GetController().LoadIfNecessary();
   }
+  return promise;
 }
 
 void WebContents::ClearHistory() {
@@ -3011,6 +3545,36 @@ void WebContents::SetWebRTCIPHandlingPolicy(
   web_contents()->GetMutableRendererPrefs()->webrtc_ip_handling_policy =
       blink::ToWebRTCIPHandlingPolicy(webrtc_ip_handling_policy);
 
+  web_contents()->SyncRendererPrefs();
+}
+
+bool WebContents::IsCaretBrowsingEnabled() const {
+  return web_contents()->GetMutableRendererPrefs()->caret_browsing_enabled;
+}
+
+// The renderer preference alone only makes Blink draw the caret; a screen
+// reader reports its position only while ui::AXPlatform is told too. AXPlatform
+// is process-wide, so a count drives it: mirroring one instance's value would
+// let one window disabling caret browsing degrade accessibility in another.
+void WebContents::ReconcileCaretBrowsingCount(bool enabled) {
+  if (caret_browsing_counted_ == enabled)
+    return;
+  caret_browsing_counted_ = enabled;
+  AdjustCaretBrowsingCount(enabled ? 1 : -1);
+}
+
+void WebContents::SetCaretBrowsingEnabled(bool enabled) {
+  auto* prefs = web_contents()->GetMutableRendererPrefs();
+  const bool pref_changed = prefs->caret_browsing_enabled != enabled;
+
+  // Reconcile before the early return below. An inherited-but-uncounted
+  // preference (see InitWithWebContents) means the preference and the
+  // count can disagree, so a no-op for the preference is not one for the count.
+  ReconcileCaretBrowsingCount(enabled);
+
+  if (!pref_changed)
+    return;
+  prefs->caret_browsing_enabled = enabled;
   web_contents()->SyncRendererPrefs();
 }
 
@@ -3112,7 +3676,7 @@ void WebContents::ForcefullyCrashRenderer() {
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
     // A generic |CrashDumpHungChildProcess()| is not implemented for Linux.
     // Instead we send an explicit IPC to crash on the renderer's IO thread.
-    rph->ForceCrash();
+    rph->CrashHungProcess();
 #else
     // Try to generate a crash report for the hung process.
 #if !IS_MAS_BUILD()
@@ -3148,8 +3712,13 @@ v8::Local<v8::Promise> WebContents::SavePage(
     return handle;
   }
 
+  // SavePackage creates its download item synchronously; run it as its own
+  // task for the same reason as Session::CreateInterruptedDownload().
   auto* handler = new SavePageHandler{std::move(promise)};
-  handler->Handle(full_file_path, save_type, web_contents());
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE,
+      base::BindOnce(&SavePageHandler::Handle, base::Unretained(handler),
+                     full_file_path, save_type, web_contents()->GetWeakPtr()));
 
   return handle;
 }
@@ -3352,10 +3921,14 @@ void WebContents::InspectServiceWorker() {
   }
 }
 
-void WebContents::SetIgnoreMenuShortcuts(bool ignore) {
-  auto* web_preferences = WebContentsPreferences::From(web_contents());
-  DCHECK(web_preferences);
-  web_preferences->SetIgnoreMenuShortcuts(ignore);
+bool WebContents::ShouldIgnoreMenuShortcutsFor(
+    content::WebContents* const source) {
+  const auto* source_contents = From(source);
+  return source_contents && source_contents->ignore_menu_shortcuts_;
+}
+
+void WebContents::SetIgnoreMenuShortcuts(const bool ignore) {
+  ignore_menu_shortcuts_ = ignore;
 }
 
 void WebContents::SetAudioMuted(bool muted) {
@@ -3437,48 +4010,57 @@ void OnGetDeviceNameToUse(base::WeakPtr<content::WebContents> web_contents,
                                std::move(print_callback));
 }
 
-void OnPDFCreated(gin_helper::Promise<v8::Local<v8::Value>> promise,
-                  print_to_pdf::PdfPrintResult print_result,
-                  scoped_refptr<base::RefCountedMemory> data) {
-  if (print_result != print_to_pdf::PdfPrintResult::kPrintSuccess) {
-    promise.RejectWithErrorMessage(
-        "Failed to generate PDF: " +
-        print_to_pdf::PdfPrintResultToString(print_result));
-    return;
-  }
-
-  v8::Isolate* isolate = promise.isolate();
-  gin_helper::Locker locker(isolate);
-  v8::HandleScope handle_scope(isolate);
-  v8::Context::Scope context_scope(
-      v8::Local<v8::Context>::New(isolate, promise.GetContext()));
-
-  v8::Local<v8::Value> buffer =
-      electron::Buffer::Copy(isolate, *data).ToLocalChecked();
-
-  promise.Resolve(buffer);
-}
 }  // namespace
 
 void WebContents::Print(gin::Arguments* const args) {
   v8::Isolate* const isolate = args->isolate();
   auto options = gin_helper::Dictionary::CreateEmpty(isolate);
 
-  if (args->Length() >= 1 && !args->GetNext(&options)) {
+  v8::Local<v8::Value> options_value;
+  if (args->GetNext(&options_value) && !options_value->IsUndefined() &&
+      (options_value->IsFunction() ||
+       !gin::ConvertFromV8(isolate, options_value, &options))) {
     args->ThrowTypeError(
         "webContents.print(): Invalid print settings specified.");
     return;
   }
 
+  // `const {pageSize, usePrinterDefaultPageSize} = options`: a throwing
+  // getter throws out of print() before anything happens.
+  std::optional<base::DictValue> media_size;
+  v8::Local<v8::Context> context = isolate->GetCurrentContext();
+  v8::Local<v8::Value> page_size;
+  v8::Local<v8::Value> use_default;
+  if (!options.GetHandle()
+           ->Get(context, gin::StringToV8(isolate, "pageSize"))
+           .ToLocal(&page_size) ||
+      !options.GetHandle()
+           ->Get(context, gin::StringToV8(isolate, kUseDefaultPrinterPageSize))
+           .ToLocal(&use_default)) {
+    return;
+  }
+  if (!page_size->IsUndefined()) {
+    if (!use_default->IsUndefined()) {
+      gin_helper::ErrorThrower(isolate).ThrowError(
+          "usePrinterDefaultPageSize cannot be combined with pageSize");
+      return;
+    }
+    media_size = MediaSizeFromPageSize(isolate, page_size);
+    if (!media_size)
+      return;
+  }
+
   printing::CompletionCallback callback;
-  if (args->Length() == 2 && !args->GetNext(&callback)) {
+  v8::Local<v8::Value> callback_value;
+  if (args->GetNext(&callback_value) && callback_value->BooleanValue(isolate) &&
+      !gin::ConvertFromV8(isolate, callback_value, &callback)) {
     args->ThrowTypeError(
         "webContents.print(): Invalid optional callback provided.");
     return;
   }
 
   base::DictValue settings;
-  if (options.IsEmptyObject()) {
+  if (!media_size && options.IsEmptyObject()) {
     content::RenderFrameHost* rfh = GetRenderFrameHostToUse(web_contents());
     if (!rfh)
       return;
@@ -3495,9 +4077,11 @@ void WebContents::Print(gin::Arguments* const args) {
   // Set optional silent printing.
   settings.Set(kSilent, options.ValueOrDefault(kSilent, false));
 
-  settings.Set(
-      printing::kSettingShouldPrintBackgrounds,
-      options.ValueOrDefault(printing::kSettingShouldPrintBackgrounds, false));
+  settings.Set(printing::kSettingShouldPrintBackgrounds,
+               options.ValueOrDefault(
+                   kPrintBackground,
+                   options.ValueOrDefault(
+                       printing::kSettingShouldPrintBackgrounds, false)));
 
   // Set custom margin settings
   auto margins = gin_helper::Dictionary::CreateEmpty(isolate);
@@ -3602,15 +4186,19 @@ void WebContents::Print(gin::Arguments* const args) {
 
   // Duplex type user wants to use.
   const auto duplex_mode = options.ValueOrDefault(
-      printing::kSettingDuplexMode, printing::mojom::DuplexMode::kSimplex);
+      kDuplexMode,
+      options.ValueOrDefault(printing::kSettingDuplexMode,
+                             printing::mojom::DuplexMode::kUnknownDuplexMode));
   settings.Set(printing::kSettingDuplexMode, static_cast<int>(duplex_mode));
 
   // Set custom media size if passed. If none is passed, the media size
   // will be set in OnGetDeviceNameToUse based on the printer's default
   // settings where applicable.
-  base::DictValue media_size;
-  if (options.Get(kMediaSize, &media_size))
-    settings.Set(printing::kSettingMediaSize, std::move(media_size));
+  if (media_size) {
+    settings.Set(printing::kSettingMediaSize, std::move(*media_size));
+  } else if (base::DictValue dict; options.Get(kMediaSize, &dict)) {
+    settings.Set(printing::kSettingMediaSize, std::move(dict));
+  }
 
   // Set custom dots per inch (dpi)
   if (gin_helper::Dictionary dpi; options.Get(kDpi, &dpi)) {
@@ -3632,64 +4220,57 @@ void WebContents::Print(gin::Arguments* const args) {
                      std::move(settings), std::move(callback)));
 }
 
-// Partially duplicated and modified from
-// headless/lib/browser/protocol/page_handler.cc;l=41
-v8::Local<v8::Promise> WebContents::PrintToPDF(const base::Value& settings) {
-  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
-  gin_helper::Promise<v8::Local<v8::Value>> promise(isolate);
+// static: a destroyed WebContents rejects rather than throws.
+v8::Local<v8::Promise> WebContents::PrintToPDF(gin::Arguments* args) {
+  v8::Isolate* isolate = args->isolate();
+  v8::Local<v8::Object> holder;
+  WebContents* self = nullptr;
+  if (!args->GetHolder(&holder) ||
+      gin_helper::Destroyable::IsDestroyed(holder) ||
+      !gin::ConvertFromV8(isolate, holder, &self) || !self ||
+      !self->web_contents()) {
+    gin_helper::Promise<v8::Local<v8::Value>> promise(isolate);
+    v8::Local<v8::Promise> handle = promise.GetHandle();
+    promise.Reject(v8::Exception::TypeError(
+        gin::StringToV8(isolate, "Object has been destroyed")));
+    return handle;
+  }
+  v8::Local<v8::Value> options;
+  args->GetNext(&options);
+  return electron::PrintToPDF(
+      isolate,
+      self->web_contents()->GetPrimaryMainFrame()->GetFrameTreeNodeId().value(),
+      base::BindRepeating(
+          [](base::WeakPtr<WebContents> self) -> content::RenderFrameHost* {
+            if (!self || !self->web_contents())
+              return nullptr;
+            return GetRenderFrameHostToUse(self->web_contents());
+          },
+          self->GetWeakPtr()),
+      {"Object has been destroyed", /*type_error=*/true}, options);
+}
+
+// static: does not need the WebContents, destroyed or not.
+v8::Local<v8::Promise> WebContents::GetPrintersAsync(v8::Isolate* isolate) {
+  return GetPrinterListAsync(isolate);
+}
+#else
+void WebContents::Print(gin::Arguments* args) {
+  LOG(ERROR) << "Error: Printing feature is disabled.";
+}
+
+// static
+v8::Local<v8::Promise> WebContents::PrintToPDF(gin::Arguments* args) {
+  gin_helper::Promise<v8::Local<v8::Value>> promise(args->isolate());
   v8::Local<v8::Promise> handle = promise.GetHandle();
-
-  // This allows us to track headless printing calls.
-  auto unique_id = settings.GetDict().FindInt(printing::kPreviewRequestID);
-  auto landscape = settings.GetDict().FindBool(kLandscape);
-  auto display_header_footer =
-      settings.GetDict().FindBool(kDisplayHeaderFooter);
-  auto print_background = settings.GetDict().FindBool(kPrintBackground);
-  auto scale = settings.GetDict().FindDouble(kScale);
-  auto paper_width = settings.GetDict().FindDouble(kPaperWidth);
-  auto paper_height = settings.GetDict().FindDouble(kPaperHeight);
-  auto margin_top = settings.GetDict().FindDouble(kMarginTop);
-  auto margin_bottom = settings.GetDict().FindDouble(kMarginBottom);
-  auto margin_left = settings.GetDict().FindDouble(kMarginLeft);
-  auto margin_right = settings.GetDict().FindDouble(kMarginRight);
-  auto page_ranges = *settings.GetDict().FindString(kPageRanges);
-  auto header_template = *settings.GetDict().FindString(kHeaderTemplate);
-  auto footer_template = *settings.GetDict().FindString(kFooterTemplate);
-  auto prefer_css_page_size = settings.GetDict().FindBool(kPreferCSSPageSize);
-  auto generate_tagged_pdf = settings.GetDict().FindBool(kGenerateTaggedPDF);
-  auto generate_document_outline =
-      settings.GetDict().FindBool(kGenerateDocumentOutline);
-
-  content::RenderFrameHost* rfh = GetRenderFrameHostToUse(web_contents());
-  absl::variant<printing::mojom::PrintPagesParamsPtr, std::string>
-      print_pages_params = print_to_pdf::GetPrintPagesParams(
-          rfh->GetLastCommittedURL(), landscape, display_header_footer,
-          print_background, scale, paper_width, paper_height, margin_top,
-          margin_bottom, margin_left, margin_right,
-          std::make_optional(header_template),
-          std::make_optional(footer_template), prefer_css_page_size,
-          generate_tagged_pdf, generate_document_outline);
-
-  if (absl::holds_alternative<std::string>(print_pages_params)) {
-    auto error = absl::get<std::string>(print_pages_params);
-    promise.RejectWithErrorMessage("Invalid print parameters: " + error);
-    return handle;
-  }
-
-  auto* manager = PrintViewManagerElectron::FromWebContents(web_contents());
-  if (!manager) {
-    promise.RejectWithErrorMessage("Failed to find print manager");
-    return handle;
-  }
-
-  auto params = std::move(
-      absl::get<printing::mojom::PrintPagesParamsPtr>(print_pages_params));
-  params->params->document_cookie = unique_id.value_or(0);
-
-  manager->PrintToPdf(rfh, page_ranges, std::move(params),
-                      base::BindOnce(&OnPDFCreated, std::move(promise)));
-
+  promise.RejectWithErrorMessage("Printing feature is disabled");
   return handle;
+}
+
+// static
+v8::Local<v8::Promise> WebContents::GetPrintersAsync(v8::Isolate* isolate) {
+  LOG(ERROR) << "Error: Printing feature is disabled.";
+  return gin_helper::Promise<std::vector<int>>::ResolvedPromise(isolate, {});
 }
 #endif
 
@@ -3862,6 +4443,12 @@ void WebContents::SendInputEvent(v8::Isolate* isolate,
     return;
 
   content::RenderWidgetHost* rwh = view->GetRenderWidgetHost();
+  // Input is held back until the first frame after a navigation arrives;
+  // an explicitly sent event should not be dropped on that account.
+  input::InputRouter* input_router =
+      content::RenderWidgetHostImpl::From(rwh)->input_router();
+  if (!input_router->IsActive())
+    input_router->MakeActive();
   blink::WebInputEvent::Type type =
       gin::GetWebInputEventType(isolate, input_event);
   if (blink::WebInputEvent::IsMouseEventType(type)) {
@@ -4006,21 +4593,15 @@ v8::Local<v8::Promise> WebContents::CapturePage(gin::Arguments* args) {
   const gfx::Size view_size =
       rect.IsEmpty() ? view->GetViewBounds().size() : rect.size();
 
-  // By default, the requested bitmap size is the view size in screen
-  // coordinates.  However, if there's more pixel detail available on the
-  // current system, increase the requested bitmap size to capture it all.
-  gfx::Size bitmap_size = view_size;
-  const gfx::NativeView native_view = view->GetNativeView();
-  const float scale = display::Screen::Get()
-                          ->GetDisplayNearestView(native_view)
-                          .device_scale_factor();
-  if (scale > 1.0f)
-    bitmap_size = gfx::ScaleToCeiledSize(view_size, scale);
+  // Capture at the view's own scale factor. Offscreen views render at
+  // |offscreen.deviceScaleFactor|, not the display's, and it may be below 1.
+  const float scale_factor = view->GetDeviceScaleFactor();
+  const gfx::Size bitmap_size = gfx::ScaleToCeiledSize(view_size, scale_factor);
 
-  view->CopyFromSurface(gfx::Rect(rect.origin(), view_size), bitmap_size,
-                        base::TimeDelta(),
-                        base::BindOnce(&OnCapturePageDone, std::move(promise),
-                                       std::move(capture_handle)));
+  view->CopyFromSurface(
+      gfx::Rect(rect.origin(), view_size), bitmap_size, base::TimeDelta(),
+      base::BindOnce(&OnCapturePageDone, std::move(promise),
+                     std::move(capture_handle), scale_factor));
   return handle;
 }
 
@@ -4078,8 +4659,11 @@ void WebContents::OnPaint(const gfx::Rect& dirty_rect,
     dict.Set("texture", tex);
   }
 
-  EmitWithoutEvent("paint", event_object, dirty_rect,
-                   gfx::Image::CreateFrom1xBitmap(bitmap));
+  auto* const view = web_contents()->GetRenderWidgetHostView();
+  const float scale_factor = view ? view->GetDeviceScaleFactor() : 1.0f;
+  EmitWithoutEvent(
+      "paint", event_object, dirty_rect,
+      gfx::Image(gfx::ImageSkia::CreateFromBitmap(bitmap, scale_factor)));
 }
 
 void WebContents::StartPainting() {
@@ -4293,7 +4877,7 @@ content::RenderFrameHost* WebContents::FocusedFrame() {
 
 void WebContents::NotifyUserActivation() {
   content::RenderFrameHost* frame = web_contents()->GetPrimaryMainFrame();
-  if (frame)
+  if (frame && frame->IsRenderFrameLive())
     frame->NotifyUserActivation(
         blink::mojom::UserActivationNotificationType::kInteraction);
 }
@@ -4330,6 +4914,11 @@ void WebContents::PDFReadyToPrint() {
   Emit("-pdf-ready-to-print");
 }
 
+bool WebContents::OnMouseEvent(const blink::WebMouseEvent& event) {
+  // |true| means that the event should be prevented.
+  return Emit("before-mouse-event", event);
+}
+
 void WebContents::OnInputEvent(const content::RenderWidgetHost& rfh,
                                const blink::WebInputEvent& event,
                                input::InputEventSource source) {
@@ -4364,10 +4953,9 @@ void WebContents::RunBeforeUnloadDialog(content::WebContents* web_contents,
   bool default_prevented = Emit("will-prevent-unload");
 
   if (pending_unload_url_.has_value() && !default_prevented) {
-    Emit("did-fail-load", static_cast<int>(net::ERR_ABORTED),
-         net::ErrorToShortString(net::ERR_ABORTED),
-         pending_unload_url_.value().possibly_invalid_spec(), true);
-    pending_unload_url_.reset();
+    GURL url = std::exchange(pending_unload_url_, std::nullopt).value();
+    EmitDidFailLoad(net::ERR_ABORTED, net::ErrorToShortString(net::ERR_ABORTED),
+                    url, true);
   }
 
   std::move(callback).Run(default_prevented, std::u16string());
@@ -4382,17 +4970,30 @@ void WebContents::CancelDialogs(content::WebContents* web_contents,
       gin::DataObjectBuilder(isolate).Set("resetState", reset_state).Build());
 }
 
-v8::Local<v8::Promise> WebContents::GetProcessMemoryInfo(v8::Isolate* isolate) {
+v8::Local<v8::Promise> WebContents::GetProcessMemoryInfo(gin::Arguments* args) {
+  v8::Isolate* isolate = args->isolate();
   gin_helper::Promise<gin_helper::Dictionary> promise(isolate);
   v8::Local<v8::Promise> handle = promise.GetHandle();
 
-  auto* frame_host = web_contents()->GetPrimaryMainFrame();
-  if (!frame_host) {
+  // With a renderer process id, report that process, provided it hosts a frame
+  // of this WebContents; otherwise the primary main frame's process.
+  content::RenderProcessHost* process = nullptr;
+  int32_t process_id = 0;
+  if (args->GetNext(&process_id)) {
+    web_contents()->GetPrimaryMainFrame()->ForEachRenderFrameHost(
+        [&](content::RenderFrameHost* rfh) {
+          if (!process && rfh->GetProcess()->GetDeprecatedID() == process_id)
+            process = rfh->GetProcess();
+        });
+  } else if (auto* frame_host = web_contents()->GetPrimaryMainFrame()) {
+    process = frame_host->GetProcess();
+  }
+  if (!process || !process->GetProcess().IsValid()) {
     promise.RejectWithErrorMessage("Failed to create memory dump");
     return handle;
   }
 
-  auto pid = frame_host->GetProcess()->GetProcess().Pid();
+  auto pid = process->GetProcess().Pid();
   memory_instrumentation::MemoryInstrumentation::GetInstance()
       ->RequestGlobalDumpForPid(
           pid, std::vector<std::string>(),
@@ -4456,6 +5057,128 @@ v8::Local<v8::Promise> WebContents::TakeHeapSnapshot(
             }
           },
           base::Owned(std::move(electron_renderer)), std::move(promise)));
+  return handle;
+}
+
+mojom::ElectronFrame* WebContents::MainFrameRenderer(
+    v8::Isolate* isolate,
+    gin_helper::PromiseBase& promise) {
+  content::RenderFrameHost* rfh = web_contents()->GetPrimaryMainFrame();
+  WebFrameMain* frame = rfh ? WebFrameMain::From(isolate, rfh) : nullptr;
+  mojom::ElectronFrame* api = frame ? frame->GetFrameApi() : nullptr;
+  if (!api) {
+    promise.RejectWithErrorMessage(
+        "Render frame was disposed before WebFrameMain could be accessed");
+  }
+  return api;
+}
+
+namespace {
+
+// A renderer acknowledgement that resolves |promise|, or rejects it if the
+// frame goes away before replying.
+base::OnceClosure AckCallback(gin_helper::Promise<void> promise) {
+  auto [on_reply, on_drop] = base::SplitOnceCallback(base::BindOnce(
+      [](gin_helper::Promise<void> promise, bool replied) {
+        if (replied)
+          promise.Resolve();
+        else
+          promise.RejectWithErrorMessage(WebFrameMain::kFrameDisposedError);
+      },
+      std::move(promise)));
+  return mojo::WrapCallbackWithDropHandler(
+      base::BindOnce(std::move(on_reply), true),
+      base::BindOnce(std::move(on_drop), false));
+}
+
+}  // namespace
+
+v8::Local<v8::Promise> WebContents::ExecuteJavaScriptInRenderer(
+    v8::Isolate* isolate,
+    int world_id,
+    const std::vector<gin_helper::Dictionary>& sources,
+    bool has_user_gesture) {
+  gin_helper::Promise<v8::Local<v8::Value>> promise(isolate);
+  v8::Local<v8::Promise> handle = promise.GetHandle();
+
+  std::vector<mojom::ScriptSourcePtr> script_sources;
+  script_sources.reserve(sources.size());
+  for (const auto& source : sources) {
+    auto script = mojom::ScriptSource::New();
+    if (!source.Get("code", &script->code)) {
+      promise.RejectWithErrorMessage("Invalid 'code'");
+      return handle;
+    }
+    source.Get("url", &script->url);
+    script_sources.push_back(std::move(script));
+  }
+
+  if (auto* renderer = MainFrameRenderer(isolate, promise)) {
+    renderer->ExecuteJavaScript(
+        world_id, std::move(script_sources), has_user_gesture,
+        WebFrameMain::BindPromiseToReply(std::move(promise)));
+  }
+  return handle;
+}
+
+v8::Local<v8::Promise> WebContents::InsertCSS(gin::Arguments* args,
+                                              const std::string& css) {
+  v8::Isolate* isolate = args->isolate();
+  gin_helper::Promise<std::u16string> promise(isolate);
+  v8::Local<v8::Promise> handle = promise.GetHandle();
+  std::string css_origin;
+  gin_helper::Dictionary options;
+  if (args->GetNext(&options))
+    options.Get("cssOrigin", &css_origin);
+  mojom::ElectronFrame* renderer = MainFrameRenderer(isolate, promise);
+  if (!renderer)
+    return handle;
+  auto [on_reply, on_drop] = base::SplitOnceCallback(base::BindOnce(
+      [](gin_helper::Promise<std::u16string> promise, bool replied,
+         const std::u16string& key) {
+        if (replied)
+          promise.Resolve(key);
+        else
+          promise.RejectWithErrorMessage(WebFrameMain::kFrameDisposedError);
+      },
+      std::move(promise)));
+  renderer->InsertCSS(
+      css, css_origin,
+      mojo::WrapCallbackWithDropHandler(
+          base::BindOnce(std::move(on_reply), true),
+          base::BindOnce(std::move(on_drop), false, std::u16string())));
+  return handle;
+}
+
+v8::Local<v8::Promise> WebContents::RemoveInsertedCSS(
+    v8::Isolate* isolate,
+    const std::u16string& key) {
+  gin_helper::Promise<void> promise(isolate);
+  v8::Local<v8::Promise> handle = promise.GetHandle();
+  if (auto* renderer = MainFrameRenderer(isolate, promise))
+    renderer->RemoveInsertedCSS(key, AckCallback(std::move(promise)));
+  return handle;
+}
+
+v8::Local<v8::Promise> WebContents::InsertText(v8::Isolate* isolate,
+                                               const std::string& text) {
+  gin_helper::Promise<void> promise(isolate);
+  v8::Local<v8::Promise> handle = promise.GetHandle();
+  if (auto* renderer = MainFrameRenderer(isolate, promise))
+    renderer->InsertText(text, AckCallback(std::move(promise)));
+  return handle;
+}
+
+v8::Local<v8::Promise> WebContents::SetVisualZoomLevelLimits(
+    v8::Isolate* isolate,
+    double min_level,
+    double max_level) {
+  gin_helper::Promise<void> promise(isolate);
+  v8::Local<v8::Promise> handle = promise.GetHandle();
+  if (auto* renderer = MainFrameRenderer(isolate, promise)) {
+    renderer->SetVisualZoomLevelLimits(min_level, max_level,
+                                       AckCallback(std::move(promise)));
+  }
   return handle;
 }
 
@@ -4888,7 +5611,9 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
       .SetMethod("getProcessId", &WebContents::GetProcessID)
       .SetMethod("getOSProcessId", &WebContents::GetOSProcessID)
       .SetMethod("clone", &WebContents::Clone)
-      .SetMethod("_loadURL", &WebContents::LoadURL)
+      .SetMethod("_setConsoleMessageObserved",
+                 &WebContents::SetConsoleMessageObserved)
+      .SetMethod("loadURL", &WebContents::LoadURL)
       .SetMethod("reload", &WebContents::Reload)
       .SetMethod("reloadIgnoringCache", &WebContents::ReloadIgnoringCache)
       .SetMethod("downloadURL", &WebContents::DownloadURL)
@@ -4934,6 +5659,9 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
       .SetMethod("setAudioMuted", &WebContents::SetAudioMuted)
       .SetMethod("isAudioMuted", &WebContents::IsAudioMuted)
       .SetMethod("isCurrentlyAudible", &WebContents::IsCurrentlyAudible)
+      .SetMethod("setCaretBrowsingEnabled",
+                 &WebContents::SetCaretBrowsingEnabled)
+      .SetMethod("isCaretBrowsingEnabled", &WebContents::IsCaretBrowsingEnabled)
       .SetMethod("undo", &WebContents::Undo)
       .SetMethod("redo", &WebContents::Redo)
       .SetMethod("cut", &WebContents::Cut)
@@ -4982,10 +5710,9 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
       .SetMethod("inspectSharedWorkerById",
                  &WebContents::InspectSharedWorkerById)
       .SetMethod("getAllSharedWorkers", &WebContents::GetAllSharedWorkers)
-#if BUILDFLAG(ENABLE_PRINTING)
-      .SetMethod("_print", &WebContents::Print)
-      .SetMethod("_printToPDF", &WebContents::PrintToPDF)
-#endif
+      .SetMethod("print", &WebContents::Print)
+      .SetMethod("printToPDF", &WebContents::PrintToPDF)
+      .SetMethod("getPrintersAsync", &WebContents::GetPrintersAsync)
       .SetMethod("_setNextChildWebPreferences",
                  &WebContents::SetNextChildWebPreferences)
       .SetMethod("addWorkSpace", &WebContents::AddWorkSpace)
@@ -5007,6 +5734,13 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
                  &WebContents::GetWebRTCIPHandlingPolicy)
       .SetMethod("getWebRTCUDPPortRange", &WebContents::GetWebRTCUDPPortRange)
       .SetMethod("takeHeapSnapshot", &WebContents::TakeHeapSnapshot)
+      .SetMethod("_executeJavaScript",
+                 &WebContents::ExecuteJavaScriptInRenderer)
+      .SetMethod("insertCSS", &WebContents::InsertCSS)
+      .SetMethod("removeInsertedCSS", &WebContents::RemoveInsertedCSS)
+      .SetMethod("insertText", &WebContents::InsertText)
+      .SetMethod("setVisualZoomLevelLimits",
+                 &WebContents::SetVisualZoomLevelLimits)
       .SetMethod("setImageAnimationPolicy",
                  &WebContents::SetImageAnimationPolicy)
       .SetMethod("_getProcessMemoryInfo", &WebContents::GetProcessMemoryInfo)
@@ -5041,12 +5775,33 @@ gin_helper::Handle<WebContents> WebContents::New(
     const gin_helper::Dictionary& options) {
   gin_helper::Handle<WebContents> handle =
       gin_helper::CreateHandle(isolate, new WebContents(isolate, options));
-  v8::TryCatch try_catch(isolate);
-  gin_helper::CallMethod(isolate, handle.get(), "_init");
-  if (try_catch.HasCaught()) {
-    node::errors::TriggerUncaughtException(isolate, try_catch);
-  }
+  handle->InitializeJS(isolate);
   return handle;
+}
+
+void WebContents::InitializeJS(v8::Isolate* const isolate) {
+  base::WeakPtr<WebContents> weak_this = GetWeakPtr();
+  v8::HandleScope handle_scope(isolate);
+  v8::Local<v8::Object> wrapper;
+  if (!GetWrapper(isolate).ToLocal(&wrapper))
+    return;
+  // 'web-contents-created' used to be emitted from inside _init: same scope.
+  node::CallbackScope callback_scope{isolate, wrapper,
+                                     node::async_context{0, 0}};
+  {
+    v8::TryCatch try_catch(isolate);
+    gin_helper::CallMethod(isolate, this, "_init");
+    if (try_catch.HasCaught())
+      node::errors::TriggerUncaughtException(isolate, try_catch);
+  }
+  v8::Local<v8::Object> app;
+  if (!weak_this || !App::Get()->GetWrapper(isolate).ToLocal(&app))
+    return;
+  v8::Local<v8::Object> event = gin_helper::internal::Event::New(isolate)
+                                    ->GetWrapper(isolate)
+                                    .ToLocalChecked();
+  gin::Dictionary(isolate, event).Set("sender", wrapper);
+  gin_helper::EmitEvent(isolate, app, "web-contents-created", event, wrapper);
 }
 
 // static
@@ -5056,11 +5811,7 @@ gin_helper::Handle<WebContents> WebContents::CreateAndTake(
     Type type) {
   gin_helper::Handle<WebContents> handle = gin_helper::CreateHandle(
       isolate, new WebContents(isolate, std::move(web_contents), type));
-  v8::TryCatch try_catch(isolate);
-  gin_helper::CallMethod(isolate, handle.get(), "_init");
-  if (try_catch.HasCaught()) {
-    node::errors::TriggerUncaughtException(isolate, try_catch);
-  }
+  handle->InitializeJS(isolate);
   return handle;
 }
 
@@ -5080,11 +5831,7 @@ gin_helper::Handle<WebContents> WebContents::FromOrCreate(
   WebContents* api_web_contents = From(web_contents);
   if (!api_web_contents) {
     api_web_contents = new WebContents(isolate, web_contents);
-    v8::TryCatch try_catch(isolate);
-    gin_helper::CallMethod(isolate, api_web_contents, "_init");
-    if (try_catch.HasCaught()) {
-      node::errors::TriggerUncaughtException(isolate, try_catch);
-    }
+    api_web_contents->InitializeJS(isolate);
   }
   return gin_helper::CreateHandle(isolate, api_web_contents);
 }
@@ -5106,6 +5853,8 @@ gin_helper::Handle<WebContents> WebContents::CreateFromWebPreferences(
     if (gin::ConvertFromV8(isolate, web_preferences.GetHandle(),
                            &web_preferences_dict)) {
       existing_preferences->SetFromDictionary(web_preferences_dict);
+      web_contents->SetIgnoreMenuShortcuts(
+          existing_preferences->ShouldIgnoreMenuShortcuts());
       web_contents->SetBackgroundColor(
           existing_preferences->GetBackgroundColor());
 
@@ -5158,6 +5907,20 @@ std::list<WebContents*> WebContents::GetWebContentsList() {
     list.push_back(iter.GetCurrentValue());
   }
   return list;
+}
+
+// static
+WebContents* WebContents::GetFocusedWebContents() {
+  WebContents* focused = nullptr;
+  for (WebContents* contents : GetWebContentsList()) {
+    if (!contents->IsFocused())
+      continue;
+    if (!focused)
+      focused = contents;
+    if (contents->type() == Type::kWebView)
+      return contents;
+  }
+  return focused;
 }
 
 // static

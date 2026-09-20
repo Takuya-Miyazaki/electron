@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -27,6 +28,7 @@
 #include "chrome/browser/icon_manager.h"
 #include "chrome/common/chrome_features.h"
 #include "chrome/common/chrome_paths.h"
+#include "components/prefs/value_map_pref_store.h"
 #include "components/proxy_config/proxy_config_dictionary.h"
 #include "components/proxy_config/proxy_config_pref_names.h"
 #include "components/proxy_config/proxy_prefs.h"
@@ -46,6 +48,7 @@
 #include "media/audio/audio_manager.h"
 #include "net/dns/public/dns_over_https_config.h"
 #include "net/dns/public/dns_over_https_server_config.h"
+#include "net/dns/public/insecure_dns_mode.h"
 #include "net/dns/public/util.h"
 #include "net/ssl/client_cert_identity.h"
 #include "net/ssl/ssl_cert_request_info.h"
@@ -53,11 +56,13 @@
 #include "sandbox/policy/switches.h"
 #include "services/network/network_service.h"
 #include "shell/app/command_line_args.h"
+#include "shell/browser/api/electron_api_event_emitter.h"
 #include "shell/browser/api/electron_api_menu.h"
 #include "shell/browser/api/electron_api_utility_process.h"
 #include "shell/browser/api/electron_api_web_contents.h"
 #include "shell/browser/api/gpuinfo_manager.h"
 #include "shell/browser/api/process_metric.h"
+#include "shell/browser/app_package.h"
 #include "shell/browser/browser_process_impl.h"
 #include "shell/browser/electron_browser_main_parts.h"
 #include "shell/browser/javascript_environment.h"
@@ -99,6 +104,7 @@
 
 #if BUILDFLAG(IS_MAC)
 #include <CoreFoundation/CoreFoundation.h>
+#include "base/apple/scoped_cftyperef.h"
 #include "base/no_destructor.h"
 #include "base/strings/utf_string_conversions.h"
 #include "content/browser/mac_helpers.h"
@@ -614,6 +620,7 @@ void App::OnActivate(bool has_visible_windows) {
 }
 
 void App::OnWillFinishLaunching() {
+  Menu::InstallDefaultApplicationMenu(JavascriptEnvironment::GetIsolate());
   Emit("will-finish-launching");
 }
 
@@ -1004,9 +1011,9 @@ std::string App::GetLocaleCountryCode() {
     base::WideToUTF8(locale_name, wcslen(locale_name), &region);
   }
 #elif BUILDFLAG(IS_MAC)
-  CFLocaleRef locale = CFLocaleCopyCurrent();
-  auto value =
-      static_cast<CFStringRef>(CFLocaleGetValue(locale, kCFLocaleCountryCode));
+  base::apple::ScopedCFTypeRef<CFLocaleRef> locale(CFLocaleCopyCurrent());
+  auto value = static_cast<CFStringRef>(
+      CFLocaleGetValue(locale.get(), kCFLocaleCountryCode));
   if (value != nil) {
     char temporaryCString[3];
     const CFIndex kCStringSize = sizeof(temporaryCString);
@@ -1236,7 +1243,8 @@ v8::Local<v8::Value> App::GetAccessibilitySupportFeatures() {
 
   v8::Local<v8::Array> arr = v8::Array::New(isolate, features.size());
   for (uint32_t i = 0; i < features.size(); ++i) {
-    arr->Set(isolate->GetCurrentContext(), i, features[i]).Check();
+    arr->CreateDataProperty(isolate->GetCurrentContext(), i, features[i])
+        .Check();
   }
   return handle_scope.Escape(arr);
 }
@@ -1694,6 +1702,20 @@ void App::ConfigureWebAuthn(gin_helper::ErrorThrower thrower,
     return;
   }
 
+  // Validate before applying so a TypeError leaves existing configuration
+  // untouched; null/undefined mean "not set".
+  std::optional<bool> platform_passkeys;
+  v8::Local<v8::Value> platform_passkeys_value;
+  if (options.Get("platformPasskeys", &platform_passkeys_value) &&
+      !platform_passkeys_value->IsNullOrUndefined()) {
+    if (!platform_passkeys_value->IsBoolean()) {
+      thrower.ThrowTypeError(
+          "configureWebAuthn: 'platformPasskeys' must be a boolean");
+      return;
+    }
+    platform_passkeys = platform_passkeys_value.As<v8::Boolean>()->Value();
+  }
+
   gin_helper::Dictionary touch_id;
   if (options.Get("touchID", &touch_id)) {
     std::string keychain_access_group;
@@ -1729,6 +1751,11 @@ void App::ConfigureWebAuthn(gin_helper::ErrorThrower thrower,
           IDS_WEBAUTHN_TOUCH_ID_PROMPT_REASON,
           base::UTF8ToUTF16(prompt_reason));
     }
+  }
+
+  if (platform_passkeys.has_value()) {
+    ElectronWebAuthenticationDelegate::SetPlatformPasskeysEnabled(
+        *platform_passkeys);
   }
 }
 
@@ -1859,22 +1886,19 @@ void ConfigureHostResolver(v8::Isolate* isolate,
   // Configure the stub resolver. This must be done after the system
   // NetworkContext is created, but before anything has the chance to use it.
   content::GetNetworkService()->ConfigureStubHostResolver(
-      enable_built_in_resolver, enable_happy_eyeballs_v3, secure_dns_mode,
-      doh_config, additional_dns_query_types_enabled,
-      {} /*fallback_doh_nameservers*/,
-      false /*insecure_dns_via_platform_apis_enabled*/);
+      enable_built_in_resolver ? net::InsecureDnsMode::kEnabledBuiltIn
+                               : net::InsecureDnsMode::kDisabled,
+      enable_happy_eyeballs_v3, secure_dns_mode, doh_config,
+      additional_dns_query_types_enabled, {} /*fallback_doh_nameservers*/);
 }
 
 // static
 App* App::Get() {
-  return Create(nullptr);
-}
-
-// static
-App* App::Create(v8::Isolate* isolate) {
-  static base::NoDestructor<cppgc::Persistent<App>> instance(
-      cppgc::MakeGarbageCollected<App>(
-          isolate->GetCppHeap()->GetAllocationHandle()));
+  static base::NoDestructor<cppgc::Persistent<App>> instance([] {
+    v8::Isolate* const isolate = JavascriptEnvironment::GetIsolate();
+    return cppgc::Persistent<App>(cppgc::MakeGarbageCollected<App>(
+        isolate->GetCppHeap()->GetAllocationHandle()));
+  }());
   return instance->Get();
 }
 
@@ -2081,7 +2105,22 @@ void Initialize(v8::Local<v8::Object> exports,
                 void* priv) {
   v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
   gin_helper::Dictionary dict{isolate, exports};
-  dict.Set("app", electron::api::App::Create(isolate));
+  electron::api::App* app = electron::api::App::Get();
+  v8::Local<v8::Object> wrapper;
+  if (app->GetWrapper(isolate).ToLocal(&wrapper)) {
+    // app is an EventEmitter.
+    std::ignore = wrapper->SetPrototype(
+        context, electron::GetEventEmitterPrototype(isolate));
+  }
+  dict.Set("app", app);
+#if BUILDFLAG(IS_LINUX)
+  // For desktop-name-spec.
+  dict.SetMethod(
+      "defaultDesktopName",
+      base::BindRepeating([](std::optional<std::u16string> name) {
+        return electron::DefaultDesktopName(name.value_or(std::u16string()));
+      }));
+#endif
 }
 
 }  // namespace

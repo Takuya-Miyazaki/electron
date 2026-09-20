@@ -28,7 +28,6 @@
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/error_thrower.h"
 #include "shell/common/gin_helper/function_template_extensions.h"
-#include "shell/common/gin_helper/object_template_builder.h"
 #include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_includes.h"
 #include "shell/common/node_util.h"
@@ -38,7 +37,6 @@
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "third_party/skia/include/core/SkColorSpace.h"
 #include "third_party/skia/include/core/SkImageInfo.h"
-#include "third_party/skia/include/core/SkPixelRef.h"
 #include "ui/base/resource/resource_scale_factor.h"
 #include "ui/base/webui/web_ui_util.h"
 #include "ui/gfx/codec/jpeg_codec.h"
@@ -299,8 +297,13 @@ v8::Local<v8::Value> NativeImage::ToBitmap(gin::Arguments* args) {
 }
 
 v8::Local<v8::Value> NativeImage::ToJPEG(v8::Isolate* isolate, int quality) {
-  const std::optional<std::vector<uint8_t>> encoded_image =
+  std::optional<std::vector<uint8_t>> encoded_image =
       gfx::JPEG1xEncodedDataFromImage(image_, quality);
+  // Images without a 1x representation are encoded from the closest one.
+  if (!encoded_image && !image_.IsEmpty()) {
+    encoded_image = gfx::JPEGCodec::Encode(
+        image_.AsImageSkia().GetRepresentation(1.0f).GetBitmap(), quality);
+  }
   if (!encoded_image)
     return NewEmptyBuffer(isolate);
   return electron::Buffer::Copy(isolate, *encoded_image).ToLocalChecked();

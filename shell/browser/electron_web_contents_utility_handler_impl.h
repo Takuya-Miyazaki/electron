@@ -10,7 +10,6 @@
 #include "content/public/browser/web_contents_observer.h"
 #include "electron/shell/common/web_contents_utility.mojom.h"
 #include "mojo/public/cpp/bindings/associated_receiver.h"
-#include "shell/browser/api/electron_api_web_contents.h"
 
 namespace content {
 class RenderFrameHost;
@@ -40,6 +39,14 @@ class ElectronWebContentsUtilityHandlerImpl
   // mojom::ElectronWebContentsUtility:
   void OnFirstNonEmptyLayout() override;
   void SetTemporaryZoomLevel(double level) override;
+  void CloseWindow() override;
+  void NotifyGuestFocusChange(bool focus) override;
+  void GetFrameRoutingIdDeprecated(
+      const blink::LocalFrameToken& frame_token,
+      GetFrameRoutingIdDeprecatedCallback callback) override;
+  void GetFrameTokenDeprecated(
+      int32_t routing_id,
+      GetFrameTokenDeprecatedCallback callback) override;
   void CanAccessClipboardDeprecated(
       mojom::PermissionName name,
       const blink::LocalFrameToken& frame_token,

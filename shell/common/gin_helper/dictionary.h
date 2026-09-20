@@ -29,6 +29,7 @@ class Dictionary : public gin::Dictionary {
 
   // Allow implicitly converting from gin::Dictionary, as it is absolutely
   // safe in this case.
+  // NOLINTNEXTLINE(google-explicit-constructor)
   Dictionary(const gin::Dictionary& dict)  // NOLINT(runtime/explicit)
       : gin::Dictionary(dict) {}
 
@@ -211,8 +212,9 @@ class Dictionary : public gin::Dictionary {
       return true;
 
     v8::Local<v8::Context> context = isolate()->GetCurrentContext();
-    v8::Local<v8::Array> props =
-        GetHandle()->GetOwnPropertyNames(context).ToLocalChecked();
+    v8::Local<v8::Array> props;
+    if (!GetHandle()->GetOwnPropertyNames(context).ToLocal(&props))
+      return false;
     return props->Length() == 0;
   }
 

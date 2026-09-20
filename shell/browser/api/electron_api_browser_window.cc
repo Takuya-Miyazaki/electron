@@ -17,6 +17,7 @@
 #include "shell/common/gin_helper/constructor.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/error_thrower.h"
+#include "shell/common/gin_helper/handle.h"
 #include "shell/common/gin_helper/object_template_builder.h"
 #include "shell/common/node_includes.h"
 #include "shell/common/options_switches.h"
@@ -131,14 +132,21 @@ void BrowserWindow::OnActivateContents() {
 #endif
 }
 
-void BrowserWindow::OnPageTitleUpdated(const std::u16string& title,
-                                       bool explicit_set) {
+void BrowserWindow::OnPageTitleUpdated(
+    const std::u16string& title,
+    bool explicit_set,
+    bool from_same_document_history_navigation) {
   // Change window title to page title.
   auto self = weak_factory_.GetWeakPtr();
   if (!Emit("page-title-updated", title, explicit_set)) {
     // |this| might be deleted, or marked as destroyed by close().
-    if (self && !IsDestroyed())
-      SetTitle(base::UTF16ToUTF8(title));
+    if (self && !IsDestroyed()) {
+      if (from_same_document_history_navigation) {
+        SetTitleFromPageIfNotSetFromApi(base::UTF16ToUTF8(title));
+      } else {
+        SetTitleFromPage(base::UTF16ToUTF8(title));
+      }
+    }
   }
 }
 
@@ -201,11 +209,6 @@ void BrowserWindow::OnWindowLeaveFullScreen() {
     web_contents()->ExitFullscreen(true);
 #endif
   BaseWindow::OnWindowLeaveFullScreen();
-}
-
-void BrowserWindow::UpdateWindowControlsOverlay(
-    const gfx::Rect& bounding_rect) {
-  web_contents()->UpdateWindowControlsOverlay(bounding_rect);
 }
 
 void BrowserWindow::CloseImmediately() {
@@ -363,7 +366,8 @@ void Initialize(v8::Local<v8::Object> exports,
   gin_helper::Dictionary dict{isolate, exports};
   dict.Set("BrowserWindow",
            gin_helper::CreateConstructor<BrowserWindow>(
-               isolate, base::BindRepeating(&BrowserWindow::New)));
+               isolate, base::BindRepeating(&BrowserWindow::New),
+               electron::api::BaseWindow::GetConstructorTemplate(isolate)));
 }
 
 }  // namespace
